@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: white-star-bot
+    env: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python Бот.py"
