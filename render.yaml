@@ -1,7 +1,16 @@
 services:
   - type: web
-    name: white-star-bot
+    name: white-star
     env: python
     plan: free
+
     buildCommand: "pip install -r requirements.txt"
-    startCommand: "python Бот.py"
+    startCommand: "python bot.py"
+
+    envVars:
+      - key: API_TOKEN
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: NEW_ADMIN_CHANNEL
+        sync: false
