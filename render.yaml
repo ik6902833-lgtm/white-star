@@ -14,3 +14,4 @@ services:
         sync: false
       - key: NEW_ADMIN_CHANNEL
         sync: false
+
