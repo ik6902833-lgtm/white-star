@@ -1,4 +1,5 @@
 import os
+import shutil
 import sqlite3
 import asyncio
 import random
@@ -465,6 +466,42 @@ async def cmd_broadcast(message: types.Message):
 @dp.message(Command("myid"))
 async def cmd_myid(message: types.Message):
     await safe_answer_message(message, f"🆔 Твой user_id: {message.from_user.id}")
+
+# ---------- НОВАЯ КОМАНДА: /backup_db (отправка базы админу) ----------
+@dp.message(Command("backup_db"))
+async def cmd_backup_db(message: types.Message):
+    """
+    Админ-команда: /backup_db
+    Отправляет файл базы данных (DB_PATH) как документ.
+    """
+    # только админ / модера
+    if not await has_admin_access(message.from_user.id):
+        await safe_answer_message(message, "❌ У вас нет доступа к этой команде.")
+        return
+
+    try:
+        # проверяем, что файл базы существует
+        if not os.path.exists(DB_PATH):
+            await safe_answer_message(
+                message,
+                f"⚠️ Файл базы не найден по пути:\n{DB_PATH}"
+            )
+            return
+
+        # делаем временную копию, чтобы не трогать живую базу
+        backup_name = "db_backup_for_send.sqlite"
+        shutil.copyfile(DB_PATH, backup_name)
+
+        await message.answer_document(
+            FSInputFile(backup_name),
+            caption="Резервная копия базы данных"
+        )
+    except Exception as e:
+        _qwarn(f"[WARN] backup_db failed: {type(e).__name__}: {e}")
+        await safe_answer_message(
+            message,
+            "⚠️ Не удалось отправить файл базы. Смотри логи на Render."
+        )
 
 @dp.message(lambda m: m.from_user.id in admin_login_states)
 async def admin_password_handler(message: types.Message):
