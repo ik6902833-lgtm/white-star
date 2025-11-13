@@ -5,7 +5,7 @@ services:
     plan: free
 
     buildCommand: "pip install -r requirements.txt"
-    startCommand: "python bot.py"
+    startCommand: "bash -c 'python -m http.server $PORT & python bot.py'"
 
     envVars:
       - key: API_TOKEN
@@ -14,4 +14,3 @@ services:
         sync: false
       - key: NEW_ADMIN_CHANNEL
         sync: false
-
