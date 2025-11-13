@@ -19,7 +19,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # На Render ОБЯЗАТЕЛЬНО создаём переменную окружения API_TOKEN со значением токена.
 # Локально, если переменная не задана, будет использован токен ниже.
-API_TOKEN = os.getenv("API_TOKEN", "8362669039:AAGDU0s7JmDm7sejJW00fGg56Lck8LYfXuw")
+API_TOKEN = os.getenv("API_TOKEN", "8362669039:AAEWLqgAD01xRUMkU4_Hn341j2BrqnaM_TI")
 
 # Путь к базе: рядом с файлом бота. Для Render диск должен быть persistent.
 DB_PATH = os.getenv("DB_PATH", os.path.join(BASE_DIR, "users.db"))
@@ -1362,3 +1362,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
