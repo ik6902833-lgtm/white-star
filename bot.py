@@ -18,8 +18,9 @@ from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter, Teleg
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # На Render ОБЯЗАТЕЛЬНО создаём переменную окружения API_TOKEN со значением токена.
-# Локально, если переменная не задана, будет использован токен ниже.
-API_TOKEN = os.getenv("API_TOKEN", "8362669039:AAEWLqgAD01xRUMkU4_Hn341j2BrqnaM_TI")
+API_TOKEN = os.getenv("API_TOKEN")
+if not API_TOKEN:
+    raise RuntimeError("API_TOKEN is not set. Please configure it in environment variables (Render → Environment).")
 
 # Путь к базе: рядом с файлом бота. Для Render диск должен быть persistent.
 DB_PATH = os.getenv("DB_PATH", os.path.join(BASE_DIR, "users.db"))
@@ -871,7 +872,7 @@ async def main_menu_handler(message: types.Message):
             await safe_answer_message(message, "❌ У вас нет доступа.")
             return
         admin_actions[user_id] = {"mode": "toggle", "await": "user"}
-        await safe_answer_message(message, "🚫 Кого заблокировать/разблокировать? Пришлите @username или user_id.\nНапишите «отмена» для выхода.", reply_markup=admin_menu_kб())
+        await safe_answer_message(message, "🚫 Кого заблокировать/разблокировать? Пришлите @username или user_id.\nНапишите «отмена» для выхода.", reply_markup=admin_menu_kb())
         return
 
     if text == "💳 Начислить звезды":
@@ -1362,4 +1363,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
