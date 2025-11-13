@@ -1,14 +1,16 @@
 services:
-  - type: web
+  - type: worker            # было: web
     name: white-star
     env: python
     plan: free
     buildCommand: "pip install -r requirements.txt"
-    startCommand: "bash -c \"python -m http.server $PORT & python bot.py\""
+    startCommand: "python bot.py"   # без http.server и без &
     envVars:
       - key: API_TOKEN
         sync: false
       - key: ADMIN_PASSWORD
         sync: false
       - key: NEW_ADMIN_CHANNEL
+        sync: false
+      - key: DB_PATH
         sync: false
