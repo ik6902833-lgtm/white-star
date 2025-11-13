@@ -3,10 +3,8 @@ services:
     name: white-star
     env: python
     plan: free
-
     buildCommand: "pip install -r requirements.txt"
-    startCommand: "bash -c 'python -m http.server $PORT & python bot.py'"
-
+    startCommand: "bash -c \"python -m http.server $PORT & python bot.py\""
     envVars:
       - key: API_TOKEN
         sync: false
