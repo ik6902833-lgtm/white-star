@@ -5,6 +5,8 @@ import asyncio
 import random
 from datetime import datetime, timedelta, timezone
 
+import libsql  # для Turso / libSQL
+
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command, CommandStart
 from aiogram.enums import ChatMemberStatus
@@ -23,8 +25,31 @@ API_TOKEN = os.getenv("API_TOKEN")
 if not API_TOKEN:
     raise RuntimeError("API_TOKEN is not set. Please configure it in environment variables (Render → Environment).")
 
-# Путь к базе: рядом с файлом бота. Для Render диск должен быть persistent.
+# Путь к базе: рядом с файлом бота. Для Render диск может быть временный,
+# но если включён Turso, это будет локальная реплика удалённой БД.
 DB_PATH = os.getenv("DB_PATH", os.path.join(BASE_DIR, "users.db"))
+
+# Turso / libSQL (если заданы переменные — используем удалённую БД)
+TURSO_URL = os.getenv("TURSO_DATABASE_URL")
+TURSO_AUTH_TOKEN = os.getenv("TURSO_AUTH_TOKEN")
+
+QUIET_LOGGING = True
+
+if TURSO_URL and TURSO_AUTH_TOKEN:
+    # Подключаемся к Turso как к embedded-реплике
+    # Документация: https://docs.turso.tech/sdk/python/quickstart
+    conn = libsql.connect(DB_PATH, sync_url=TURSO_URL, auth_token=TURSO_AUTH_TOKEN)
+    try:
+        # Подтягиваем данные из удалённой БД (если уже есть)
+        conn.sync()
+    except Exception:
+        if not QUIET_LOGGING:
+            print("WARN: Turso sync() failed on startup")
+else:
+    # Старый вариант — обычная локальная SQLite
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+
+cursor = conn.cursor()
 
 # канал для уведомлений админа
 NEW_ADMIN_CHANNEL = os.getenv("NEW_ADMIN_CHANNEL", "sdafsadfsdaf13")
@@ -53,11 +78,6 @@ INSTRUCTION_LINK = "https://t.me/+JIE3W3PVNYdjYjM6"
 
 # пароль можно тоже вынести в окружение, но оставим дефолт
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "jikolpkolp")
-
-QUIET_LOGGING = True
-
-conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-cursor = conn.cursor()
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS users (
@@ -238,6 +258,7 @@ async def do_broadcast(admin_id: int, sample_chat_id: int, sample_message_id: in
         INSERT INTO broadcast_logs(started_at, finished_at, total, sent, forbidden, failed, sample_chat_id, sample_message_id)
         VALUES(?,?,?,?,?,?,?,?)
     """, (now_kyiv().isoformat(), None, total, 0, 0, 0, int(sample_chat_id), int(sample_message_id)))
+    # для Turso/SQLite lastrowid одинаково работает
     log_id = cursor.lastrowid
     conn.commit()
 
@@ -473,14 +494,13 @@ async def cmd_backup_db(message: types.Message):
     """
     Админ-команда: /backup_db
     Отправляет файл базы данных (DB_PATH) как документ.
+    Если используется Turso, это локальная реплика удалённой БД.
     """
-    # только админ / модера
     if not await has_admin_access(message.from_user.id):
         await safe_answer_message(message, "❌ У вас нет доступа к этой команде.")
         return
 
     try:
-        # проверяем, что файл базы существует
         if not os.path.exists(DB_PATH):
             await safe_answer_message(
                 message,
@@ -488,7 +508,6 @@ async def cmd_backup_db(message: types.Message):
             )
             return
 
-        # делаем временную копию, чтобы не трогать живую базу
         backup_name = "db_backup_for_send.sqlite"
         shutil.copyfile(DB_PATH, backup_name)
 
@@ -909,7 +928,104 @@ async def main_menu_handler(message: types.Message):
             await safe_answer_message(message, "❌ У вас нет доступа.")
             return
         admin_actions[user_id] = {"mode": "toggle", "await": "user"}
-        await safe_answer_message(message, "🚫 Кого заблокировать/разблокировать? Пришлите @username или user_id.\nНапишите «отмена» для выхода.", reply_markup=admin_menu_kb())
+        await safe_answer_message(message, "🚫 Кого заблокировать/разблокировать? Пришлите @username или user_id.\nНапишите «отмена» для выхода.", reply_markup=admin_menu_kk())
+        return
+# ---------------------- Главный меню-хендлер ----------------------
+
+@dp.message()
+async def main_menu_handler(message: types.Message):
+    uid = message.from_user.id
+    text = (message.text or "").strip()
+
+    if text == "🚪 Выйти из админки":
+        if uid in admin_sessions:
+            admin_sessions.discard(uid)
+        admin_actions.pop(uid, None)
+        await safe_answer_message(message, "🚪 Вы вышли из админ-панели.", reply_markup=ReplyKeyboardRemove())
+        await safe_send_message(uid, "🔝 Главное меню", reply_markup=main_menu_keyboard())
+        return
+
+    if text.startswith("/"):
+        admin_actions.pop(uid, None)
+        return
+
+    nav_buttons = {
+        "Заработать звезды🌟",
+        "Профиль 👤",
+        "Рейтинг 📊",
+        "Инструкция 📕",
+        "Информация📚",
+        "Вывести звезды✨",
+        "Назад",
+        "🔄 Обнулить пользователя",
+        "🚫 Заблокировать / Разблокировать",
+        "💳 Начислить звезды",
+        "📢 Рассылка",
+        "📈 Статистика пользователей",
+    }
+    if text in nav_buttons:
+        admin_actions.pop(uid, None)
+
+    # ----- Новая кнопка: статистика пользователей -----
+    if text == "📈 Статистика пользователей":
+        if not await has_admin_access(uid):
+            await safe_answer_message(message, "❌ У вас нет доступа.")
+            return
+        cursor.execute("SELECT COUNT(*) FROM users")
+        total = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM users WHERE blocked=1")
+        blocked = cursor.fetchone()[0]
+        active = total - blocked
+        msg = (
+            f"Всего пользователей: {total}\n"
+            f"Активных: {active}\n"
+            f"Заблокировали бота: {blocked}"
+        )
+        await safe_answer_message(message, msg, reply_markup=admin_menu_kb())
+        return
+
+    if await maybe_handle_admin_dialog(message):
+        return
+
+    user_id = uid
+
+    cursor.execute("SELECT blocked FROM users WHERE user_id=?", (user_id,))
+    blk = cursor.fetchone()
+    if blk and blk[0] == 1:
+        await safe_answer_message(message, "🚫 Вы заблокированы администратором.")
+        return
+
+    if text == "📢 Рассылка":
+        if not await has_admin_access(user_id):
+            await safe_answer_message(message, "❌ У вас нет доступа.")
+            return
+        admin_actions[user_id] = {"mode": "broadcast", "await": "sample"}
+        await safe_answer_message(
+            message,
+            "📢 Пришлите сообщение, которое нужно разослать всем пользователям в базе (любой тип: текст/фото/видео/документ/голос/кружок и т.п.).\n\n"
+            "Напишите «да» после — чтобы подтвердить рассылку. «отмена» — чтобы выйти.",
+            reply_markup=admin_menu_kb()
+        )
+        return
+
+    if text == "🔄 Обнулить пользователя":
+        if not await has_admin_access(user_id):
+            await safe_answer_message(message, "❌ У вас нет доступа.")
+            return
+        admin_actions[user_id] = {"mode": "reset", "await": "user"}
+        await safe_answer_message(message, "🧹 Кого обнулить? Пришлите @username или user_id.\nНапишите «отмена» для выхода.", reply_markup=admin_menu_kb())
+        return
+
+    if text == "🚫 Заблокировать / Разблокировать":
+        if not await has_admin_access(user_id):
+            await safe_answer_message(message, "❌ У вас нет доступа.")
+            return
+        admin_actions[user_id] = {"mode": "toggle", "await": "user"}
+        await safe_answer_message(
+            message,
+            "🚫 Кого заблокировать/разблокировать? Пришлите @username или user_id.\nНапишите «отмена» для выхода.",
+            reply_markup=admin_menu_kb()
+        )
         return
 
     if text == "💳 Начислить звезды":
@@ -917,7 +1033,11 @@ async def main_menu_handler(message: types.Message):
             await safe_answer_message(message, "❌ У вас нет доступа.")
             return
         admin_actions[user_id] = {"mode": "grant", "await": "user"}
-        await safe_answer_message(message, "💳 Кому начислить звезды? Пришлите @username или user_id.\nНапишите «отмена» для выхода.", reply_markup=admin_menu_kb())
+        await safe_answer_message(
+            message,
+            "💳 Кому начислить звезды? Пришлите @username или user_id.\nНапишите «отмена» для выхода.",
+            reply_markup=admin_menu_kb()
+        )
         return
 
     if text == "Назад":
@@ -937,7 +1057,12 @@ async def main_menu_handler(message: types.Message):
                 await safe_answer_message(message, "Введите цифру: 15, 25, 50 или 100.", reply_markup=back_keyboard())
                 return
             if amount not in (15, 25, 50, 100):
-                await safe_answer_message(message, "Мы выводим только выводы на суммы: <b>15⭐️, 25⭐️, 50⭐️ и 100⭐️</b>", reply_markup=back_keyboard(), parse_mode="HTML")
+                await safe_answer_message(
+                    message,
+                    "Мы выводим только выводы на суммы: <b>15⭐️, 25⭐️, 50⭐️ и 100⭐️</b>",
+                    reply_markup=back_keyboard(),
+                    parse_mode="HTML"
+                )
                 return
             cursor.execute("SELECT balance FROM users WHERE user_id=?", (user_id,))
             r = cursor.fetchone()
@@ -999,7 +1124,11 @@ async def main_menu_handler(message: types.Message):
 
         if row[2] == 0:
             miss = await missing_channels(user_id)
-            await safe_answer_message(message, "Уважаемый пользователь, к сожалению, вы не подписаны на спонсоров😢, попробуйте снова", reply_markup=sponsor_keyboard(miss))
+            await safe_answer_message(
+                message,
+                "Уважаемый пользователь, к сожалению, вы не подписаны на спонсоров😢, попробуйте снова",
+                reply_markup=sponsor_keyboard(miss)
+            )
             return
 
         if text == "Заработать звезды🌟":
@@ -1068,7 +1197,10 @@ async def main_menu_handler(message: types.Message):
                 "Введите какую сумму звёзд вы хотите вывести:\n\n"
                 "Выводим только — <b>15⭐️, 25⭐️, 50⭐️, 100⭐️</b>"
             )
-            await send_photo_caption(user_id, WITHDRAW_IMG_PATH, caption, reply_markup=back_keyboard(), parse_mode="HTML")
+            await send_photo_caption(
+                user_id, WITHDRAW_IMG_PATH, caption,
+                reply_markup=back_keyboard(), parse_mode="HTML"
+            )
             user_states[user_id] = {"stage": "await_amount"}
         else:
             await safe_answer_message(message, f"Вы нажали кнопку: {text}", reply_markup=back_keyboard())
@@ -1121,14 +1253,22 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
                 await do_broadcast(uid, sample_chat_id, sample_message_id)
                 return True
             else:
-                await safe_answer_message(message, "Не понял. Напишите «да» для запуска рассылки или «отмена».", reply_markup=admin_menu_kb())
+                await safe_answer_message(
+                    message,
+                    "Не понял. Напишите «да» для запуска рассылки или «отмена».",
+                    reply_markup=admin_menu_kb()
+                )
                 return True
 
     # ===== Остальные режимы (reset/toggle/grant)
     if step == "user":
         target_id, target_username = parse_user_ref(message.text or "")
         if not target_id:
-            await safe_answer_message(message, "❗ Не нашёл такого пользователя. Пришлите корректный @username или user_id, либо напишите «отмена».", reply_markup=admin_menu_kb())
+            await safe_answer_message(
+                message,
+                "❗ Не нашёл такого пользователя. Пришлите корректный @username или user_id, либо напишите «отмена».",
+                reply_markup=admin_menu_kb()
+            )
             return True
 
         if mode == "reset":
@@ -1159,14 +1299,22 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
             state["await"] = "amount"
             state["target_id"] = target_id
             admin_actions[uid] = state
-            await safe_answer_message(message, f"💳 Ок. Сколько ⭐️ начислить пользователю {target_id}? Напишите число. («отмена» для выхода)", reply_markup=admin_menu_kb())
+            await safe_answer_message(
+                message,
+                f"💳 Ок. Сколько ⭐️ начислить пользователю {target_id}? Напишите число. («отмена» для выхода)",
+                reply_markup=admin_menu_kb()
+            )
             return True
 
     if step == "amount" and mode == "grant":
         try:
             amount = float((message.text or "").replace(",", "."))
         except Exception:
-            await safe_answer_message(message, "❗ Введите число (например: 10 или 25.0).", reply_markup=admin_menu_kb())
+            await safe_answer_message(
+                message,
+                "❗ Введите число (например: 10 или 25.0).",
+                reply_markup=admin_menu_kb()
+            )
             return True
         if amount <= 0:
             await safe_answer_message(message, "❗ Сумма должна быть положительной.", reply_markup=admin_menu_kb())
@@ -1190,12 +1338,23 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
         await safe_answer_message(message, f"✅ Начислено {amount}⭐️ пользователю {target_id}.", reply_markup=admin_menu_kb())
         return True
 
-    await safe_answer_message(message, "❗ Неверный ввод. Пришлите @username или user_id, либо «отмена».", reply_markup=admin_menu_kb())
+    await safe_answer_message(
+        message,
+        "❗ Неверный ввод. Пришлите @username или user_id, либо «отмена».",
+        reply_markup=admin_menu_kb()
+    )
     return True
 
 # ---------------------- Выводы (callbacks) ----------------------
 
-@dp.callback_query(lambda c: c.data and (c.data.startswith("confirm_amount:") or c.data == "withdraw_back" or c.data.startswith("create_withdraw:") or c.data.startswith("redo_withdraw_user:")))
+@dp.callback_query(
+    lambda c: c.data and (
+        c.data.startswith("confirm_amount:") or
+        c.data == "withdraw_back" or
+        c.data.startswith("create_withdraw:") or
+        c.data.startswith("redo_withdraw_user:")
+    )
+)
 async def withdraw_confirm_handlers(callback: types.CallbackQuery):
     data = callback.data
     user_id = callback.from_user.id
@@ -1216,7 +1375,7 @@ async def withdraw_confirm_handlers(callback: types.CallbackQuery):
             _, uid_s, amount_s = parts
             uid = int(uid_s)
             amount = int(amount_s)
-        except:
+        except Exception:
             await callback.answer()
             return
         if uid != user_id:
@@ -1241,7 +1400,7 @@ async def withdraw_confirm_handlers(callback: types.CallbackQuery):
         try:
             _, uid_s = parts
             uid = int(uid_s)
-        except:
+        except Exception:
             await callback.answer()
             return
         if uid != user_id:
@@ -1267,8 +1426,10 @@ async def withdraw_confirm_handlers(callback: types.CallbackQuery):
             await callback.answer()
             return
 
-        cursor.execute("INSERT INTO withdrawals(user_id, amount, to_username, status, created_at) VALUES(?,?,?,?,?)",
-                       (user_id, amount, to_username, "pending", now_kyiv().isoformat()))
+        cursor.execute(
+            "INSERT INTO withdrawals(user_id, amount, to_username, status, created_at) VALUES(?,?,?,?,?)",
+            (user_id, amount, to_username, "pending", now_kyiv().isoformat())
+        )
         withdraw_id = cursor.lastrowid
         cursor.execute("UPDATE users SET balance = balance - ? WHERE user_id=?", (amount, user_id))
         conn.commit()
@@ -1277,11 +1438,13 @@ async def withdraw_confirm_handlers(callback: types.CallbackQuery):
         cursor.execute("SELECT username FROM users WHERE user_id=?", (user_id,))
         usr_row = cursor.fetchone()
         usr = usr_row[0] if usr_row and usr_row[0] else "None"
-        admin_text = (f"Заявка #{withdraw_id}\n"
-                      f"Пользователь: @{usr} ({user_id})\n"
-                      f"Сумма: {amount} ⭐️\n"
-                      f"Кому: {to_username}\n"
-                      f"Время: {now_kyiv().isoformat()}")
+        admin_text = (
+            f"Заявка #{withdraw_id}\n"
+            f"Пользователь: @{usr} ({user_id})\n"
+            f"Сумма: {amount} ⭐️\n"
+            f"Кому: {to_username}\n"
+            f"Время: {now_kyiv().isoformat()}"
+        )
         try:
             await bot.send_message(CHANNEL_FOR_WITHDRAW, admin_text, reply_markup=kb_admin)
         except Exception as e:
@@ -1294,7 +1457,9 @@ async def withdraw_confirm_handlers(callback: types.CallbackQuery):
 
         msg = await safe_send_message(
             user_id,
-            f"✅ <b>Заявка на вывод создана</b>\n\n<b>Сумма вывода:</b> {amount}⭐️\n<b>Юзернейм:</b> {to_username}",
+            f"✅ <b>Заявка на вывод создана</b>\n\n"
+            f"<b>Сумма вывода:</b> {amount}⭐️\n"
+            f"<b>Юзернейм:</b> {to_username}",
             reply_markup=main_menu_keyboard(),
             parse_mode="HTML"
         )
@@ -1314,7 +1479,7 @@ async def withdraw_confirm_handlers(callback: types.CallbackQuery):
         try:
             _, uid_s = parts
             uid = int(uid_s)
-        except:
+        except Exception:
             await callback.answer()
             return
         if uid != user_id:
@@ -1347,7 +1512,7 @@ async def admin_withdraw_handlers(callback: types.CallbackQuery):
     try:
         _, withdraw_id_s = parts
         withdraw_id = int(withdraw_id_s)
-    except:
+    except Exception:
         await callback.answer()
         return
 
