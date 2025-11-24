@@ -1,11 +1,12 @@
 import os
-import shutil
 import sqlite3
 import asyncio
 import random
+import time
 from datetime import datetime, timedelta, timezone
 
-from aiohttp import web  # <--- для веб-сервера (порт)
+import aiohttp  # SubGram
+import logging  # для логов при необходимости
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command, CommandStart
@@ -17,57 +18,52 @@ from aiogram.types import (
 )
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter, TelegramBadRequest
 
-# === БАЗОВЫЕ НАСТРОЙКИ/ПУТИ ДЛЯ ЛОКАЛЬНОГО И СЕРВЕРА ===
+API_TOKEN = "8362669039:AAEWLqgAD01xRUMkU4_Hn341j2BrqnaM_TI"
+DB_PATH = "users.db"
+
+# (значение оставлено как просили; нормализация выполняется в notify_admin_channel)
+NEW_ADMIN_CHANNEL = "sdafsadfsdaf13"
+
+# --- пути под Render / GitHub (относительные) ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# На Render ОБЯЗАТЕЛЬНО создаём переменную окружения API_TOKEN со значением токена.
-API_TOKEN = os.getenv("API_TOKEN")
-if not API_TOKEN:
-    raise RuntimeError("API_TOKEN is not set. Please configure it in environment variables (Render → Environment).")
-
-# Путь к базе: берём из переменной окружения, по умолчанию рядом с файлом бота.
-# На Render УКАЖИ DB_PATH=/data/users.db (или другой путь на persistent диске),
-# чтобы база не удалялась при каждом деплое.
-DB_PATH = os.getenv("DB_PATH", os.path.join(BASE_DIR, "users.db"))
-
-# Порт для веб-сервера (Render WEB service требует слушать этот порт)
-PORT = int(os.getenv("PORT", "8000"))
-
-# канал для уведомлений админа
-NEW_ADMIN_CHANNEL = os.getenv("NEW_ADMIN_CHANNEL", "sdafsadfsdaf13")
-
-# пути к картинкам (относительно проекта)
 PROFILE_IMG_PATH = os.path.join(BASE_DIR, "images", "profile.png.png")
 EARNINGS_IMG_PATH = os.path.join(BASE_DIR, "images", "earnings.png.png")
 WITHDRAW_IMG_PATH = os.path.join(BASE_DIR, "images", "withdraw.png.png")
 RATING_IMG_PATH = os.path.join(BASE_DIR, "images", "rating.png.png")
 
-SPONSORS = [
-    "@WhiteStarXInfo",
-]
-CHANNELS_TO_CHECK = SPONSORS
-
 BOT_USERNAME = "WhiteStarXBot"
 
+# --- твои ручные спонсоры (кроме SubGram) ---
+# (что открываем по кнопке, что проверяем по подписке)
+SPONSORS_REQUIRED = [
+    ("@WhiteStarXInfo", "@WhiteStarXInfo"),  # открытый канал, проверяем напрямую
+]
+
+SPONSORS_OPTIONAL = [
+    ("https://t.me/+OrchFu8r2vNjZjhk", None),  # просто клик, без проверки
+]
+
+# ---------- SubGram настройки ----------
+SUBGRAM_API_KEY = "e263a455ef68c942129a72539abe515457c5df8f840cf4e333c4777e1e66a789"
+SUBGRAM_URL = "https://api.subgram.org/get-sponsors"
+SUBGRAM_BLOCKING_STATUSES = ["warning", "gender", "age", "register"]
+# ---------------------------------------
+
+# Базовые значения (дефолт). REFERRAL_REWARD дальше переопределяется из базы.
 REFERRAL_REWARD = 4
 REFERRAL_BONUS_EVERY = 10
 REFERRAL_BONUS_AMOUNT = 10
 
+# Порог оставлен как константа, но не используется для отказа в награде
 YOUNG_ACCOUNT_THRESHOLD = 7_500_000_000
 
 CHANNEL_FOR_WITHDRAW = -1003003114178
 INSTRUCTION_LINK = "https://t.me/+JIE3W3PVNYdjYjM6"
+ADMIN_PASSWORD = "jikolpkolp"
 
-# пароль можно тоже вынести в окружение, но оставим дефолт
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "jikolpkolp")
-
-QUIET_LOGGING = True
-
-# === ИНИЦИАЛИЗАЦИЯ БАЗЫ SQLITE (ПУТЬ МОЖНО ВЫНЕСТИ НА PERSISTENT DISK) ===
-# на всякий случай — создадим директорию, если путь включает папку
-db_dir = os.path.dirname(DB_PATH)
-if db_dir and not os.path.exists(db_dir):
-    os.makedirs(db_dir, exist_ok=True)
+# Тихие логи — персональные данные не печатаем
+QUIET_LOGGING = False
 
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cursor = conn.cursor()
@@ -84,7 +80,8 @@ CREATE TABLE IF NOT EXISTS users (
     referrer_id INTEGER DEFAULT 0,
     referral_link TEXT,
     created_at TEXT,
-    blocked INTEGER DEFAULT 0
+    blocked INTEGER DEFAULT 0,
+    delivery_failed INTEGER DEFAULT 0
 );
 """)
 
@@ -110,7 +107,7 @@ CREATE TABLE IF NOT EXISTS withdrawals (
 )
 """)
 
-# Логи рассылок (оставил — может пригодиться дальше)
+# Логи рассылок
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS broadcast_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -125,7 +122,42 @@ CREATE TABLE IF NOT EXISTS broadcast_logs (
 )
 """)
 
+# Новая таблица конфигурации (в том числе для награды за реферала)
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS config (
+    key TEXT PRIMARY KEY,
+    value TEXT
+)
+""")
+
 conn.commit()
+
+# На случай старой базы без delivery_failed — аккуратный ALTER
+try:
+    cursor.execute("ALTER TABLE users ADD COLUMN delivery_failed INTEGER DEFAULT 0")
+    conn.commit()
+except Exception:
+    # колонка уже есть или старая sqlite не даёт — пропускаем
+    pass
+
+# Подгружаем REFERRAL_REWARD из базы (если есть), иначе записываем туда дефолт
+try:
+    cursor.execute("SELECT value FROM config WHERE key='referral_reward'")
+    row = cursor.fetchone()
+    if row:
+        try:
+            REFERRAL_REWARD = int(row[0])
+        except Exception:
+            pass
+    else:
+        cursor.execute(
+            "INSERT INTO config(key, value) VALUES('referral_reward', ?)",
+            (str(REFERRAL_REWARD),)
+        )
+        conn.commit()
+except Exception:
+    # Если что-то сломалось, просто идём с дефолтным значением 4
+    pass
 
 user_states = {}
 admin_sessions = set()
@@ -140,6 +172,7 @@ _stats_cache_date = None
 _stats_cache_users = BASE_USERS
 _stats_cache_withdrawn = BASE_WITHDRAWN
 
+# уменьшаем таймаут запросов к Telegram до 5 секунд
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
@@ -148,6 +181,23 @@ dp = Dispatcher()
 def _qwarn(msg: str):
     if not QUIET_LOGGING:
         print(msg)
+
+
+def set_referral_reward(new_value: int):
+    """
+    Обновляет глобальную награду за реферала и сохраняет её в базе.
+    """
+    global REFERRAL_REWARD
+    REFERRAL_REWARD = new_value
+    try:
+        cursor.execute(
+            "INSERT OR REPLACE INTO config(key, value) VALUES('referral_reward', ?)",
+            (str(new_value),)
+        )
+        conn.commit()
+    except Exception as e:
+        _qwarn(f"[WARN] set_referral_reward failed: {type(e).__name__}")
+
 
 async def safe_send_message(chat_id: int, text: str, **kwargs):
     try:
@@ -158,6 +208,7 @@ async def safe_send_message(chat_id: int, text: str, **kwargs):
         _qwarn(f"[WARN] send_message failed: {type(e).__name__}")
         return None
 
+
 async def safe_answer_message(message: types.Message, text: str, **kwargs):
     try:
         return await message.answer(text, **kwargs)
@@ -167,6 +218,7 @@ async def safe_answer_message(message: types.Message, text: str, **kwargs):
         _qwarn(f"[WARN] message.answer failed: {type(e).__name__}")
         return None
 
+
 async def safe_edit_text(message: types.Message, new_text: str, **kwargs):
     try:
         return await message.edit_text(new_text, **kwargs)
@@ -175,6 +227,7 @@ async def safe_edit_text(message: types.Message, new_text: str, **kwargs):
     except Exception as e:
         _qwarn(f"[WARN] edit_text failed: {type(e).__name__}")
         return None
+
 
 async def send_photo_caption(chat_id: int, image_path: str, caption: str, reply_markup=None, parse_mode="HTML"):
     try:
@@ -191,6 +244,7 @@ async def send_photo_caption(chat_id: int, image_path: str, caption: str, reply_
     except Exception as e:
         _qwarn(f"[WARN] send_photo_caption failed ({os.path.basename(image_path) if image_path else 'no_image'}): {type(e).__name__}")
         return await safe_send_message(chat_id, caption, reply_markup=reply_markup, parse_mode=parse_mode)
+
 
 def normalize_chat_target(target):
     if isinstance(target, int):
@@ -211,12 +265,30 @@ def normalize_chat_target(target):
         return alias if alias.startswith("@") else ("@" + alias if alias else s)
     return s if s.startswith("@") else "@" + s
 
+
+def make_tg_url(link):
+    """
+    Приводим ссылку/юзернейм к кликабельному URL.
+    """
+    if not link:
+        return None
+    s = str(link)
+    if s.startswith("@"):
+        return f"https://t.me/{s[1:]}"
+    if s.startswith("t.me/"):
+        return "https://" + s
+    if s.startswith("http://") or s.startswith("https://"):
+        return s
+    return s
+
+
 async def notify_admin_channel(text: str):
     chat = normalize_chat_target(NEW_ADMIN_CHANNEL)
     try:
         await bot.send_message(chat, text, parse_mode="HTML")
     except Exception as e:
         _qwarn(f"[WARN] notify_admin_channel failed: {type(e).__name__}")
+
 
 async def resolve_username_display(user_id: int) -> str:
     try:
@@ -235,9 +307,242 @@ async def resolve_username_display(user_id: int) -> str:
     except Exception:
         return "—"
 
-# ====== РАССЫЛКА: надёжная реализация с троттлингом и 429 ======
+
+# ====== Ручные спонсоры (помимо SubGram) ======
+
+async def gather_manual_sponsors(user_id: int):
+    """
+    Возвращает:
+      required_missing: ссылки на обязательные каналы, на которые пользователь НЕ подписан
+      optional_links: все дополнительные (опциональные) ссылки
+    """
+    required_missing = []
+    optional_links = []
+
+    # обязательные
+    for open_link, check_target in SPONSORS_REQUIRED:
+        url = make_tg_url(open_link or check_target)
+        chat_to_check = normalize_chat_target(check_target or open_link)
+        need_button = False
+        if chat_to_check:
+            try:
+                member = await bot.get_chat_member(chat_id=chat_to_check, user_id=user_id)
+                if member.status not in (
+                    ChatMemberStatus.MEMBER,
+                    ChatMemberStatus.ADMINISTRATOR,
+                    ChatMemberStatus.CREATOR,
+                ):
+                    need_button = True
+            except Exception:
+                # на ошибке тоже выводим кнопку, чтобы пользователь сам подписался
+                need_button = True
+        if need_button and url:
+            required_missing.append(url)
+
+    # опциональные
+    for open_link, _ in SPONSORS_OPTIONAL:
+        url = make_tg_url(open_link)
+        if url:
+            optional_links.append(url)
+
+    return required_missing, optional_links
+
+
+async def process_manual_sponsors(user: types.User, chat_id: int) -> bool:
+    """
+    Проверка ТВОИХ спонсоров (из списков выше).
+
+    True  — всё ок, можно пускать дальше.
+    False — показали сообщение с каналами, ждём пока подпишется.
+    """
+    required_missing, optional_links = await gather_manual_sponsors(user.id)
+    if not required_missing:
+        # все обязательные каналы уже подписаны
+        return True
+
+    # собираем все ссылки, которые нужно показать
+    all_links = required_missing + optional_links
+    idx = 1
+    rows = []
+    temp_row = []
+    seen = set()
+
+    for url in all_links:
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        btn = InlineKeyboardButton(text=f"Канал {idx}#", url=url)
+        temp_row.append(btn)
+        idx += 1
+        if len(temp_row) == 2:
+            rows.append(temp_row)
+            temp_row = []
+    if temp_row:
+        rows.append(temp_row)
+
+    # одна кнопка на проверку (та же, что и у SubGram — общий стиль)
+    rows.append([InlineKeyboardButton(text="✅Проверить подписку", callback_data="subgram-op")])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=rows)
+    text = "Уважаемый пользователь, к сожалению, вы не подписаны на спонсоров😢, попробуйте снова:"
+    await bot.send_message(chat_id, text, reply_markup=kb)
+    return False
+
+
+# ====== SubGram: /get-sponsors ======
+
+async def subgram_get_sponsors(user: types.User, chat_id: int, extra: dict | None = None) -> dict | None:
+    """
+    Универсальная функция запроса к SubGram /get-sponsors.
+    Возвращает dict (ответ JSON) или None при ошибке.
+    """
+    headers = {"Auth": SUBGRAM_API_KEY}
+    payload = {
+        "user_id": user.id,
+        "chat_id": chat_id,
+    }
+    if extra:
+        for k, v in extra.items():
+            if v is not None:
+                payload[k] = v
+
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.post(SUBGRAM_URL, headers=headers, json=payload, timeout=10) as response:
+                return await response.json()
+        except Exception as e:
+            _qwarn(f"[WARN] SubGram request failed: {type(e).__name__}")
+            return None
+
+
+async def process_subgram_check(user: types.User, chat_id: int, api_kwargs: dict | None = None) -> bool:
+    """
+    Основная логика обработки статусов SubGram.
+    Возвращает:
+      True  — можно дать доступ дальше (идём в меню),
+      False — нужно остановиться, т.к. отправили задания/опрос/регистрацию.
+    """
+    if api_kwargs is None:
+        api_kwargs = {}
+
+    user_data = {
+        "first_name": user.first_name,
+        "username": user.username,
+        "language_code": getattr(user, "language_code", None),
+        "is_premium": bool(getattr(user, "is_premium", False)),
+    }
+    user_data.update(api_kwargs)
+
+    response = await subgram_get_sponsors(user, chat_id, user_data)
+    if not response:
+        # если API не ответил — не режем пользователя (дальше проверим только твоих спонсоров)
+        return True
+
+    status = response.get("status")
+
+    # если статус не блокирующий — даём доступ дальше
+    if not status or status not in SUBGRAM_BLOCKING_STATUSES:
+        if status == "error":
+            _qwarn(f"[WARN] SubGram error: {response.get('message')}")
+        return True
+
+    text = ""
+    rows: list[list[InlineKeyboardButton]] = []
+
+    if status == "warning":
+        # Здесь используем ТВОЙ шаблон: "Канал 1#", "Канал 2#" и кнопку "✅Проверить подписку"
+        text = "Уважаемый пользователь, к сожалению, вы не подписаны на спонсоров😢, попробуйте снова:"
+
+        sponsors = response.get("additional", {}).get("sponsors", [])
+        all_links = []
+
+        # ссылки от SubGram
+        for sponsor in sponsors:
+            try:
+                if sponsor.get("available_now") and sponsor.get("status") == "unsubscribed":
+                    link = sponsor.get("link")
+                    if not link:
+                        continue
+                    url = make_tg_url(link)
+                    if url:
+                        all_links.append(url)
+            except Exception:
+                continue
+
+        # добавляем ТВОИХ спонсоров (обязательные, на которые не подписан, и все опциональные)
+        manual_required, manual_optional = await gather_manual_sponsors(user.id)
+        all_links.extend(manual_required)
+        all_links.extend(manual_optional)
+
+        # собираем кнопки
+        idx = 1
+        temp_row = []
+        seen = set()
+        for url in all_links:
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            btn = InlineKeyboardButton(text=f"Канал {idx}#", url=url)
+            temp_row.append(btn)
+            idx += 1
+            if len(temp_row) == 2:
+                rows.append(temp_row)
+                temp_row = []
+        if temp_row:
+            rows.append(temp_row)
+
+        # кнопка проверки
+        rows.append([InlineKeyboardButton(text="✅Проверить подписку", callback_data="subgram-op")])
+
+    elif status == "gender":
+        # Пол спрашиваем только по требованию SubGram (это их логика), свою старую выборку пола мы убрали.
+        text = "Укажите ваш пол:"
+        rows.append([
+            InlineKeyboardButton(text="Мужской", callback_data="subgram_gender_male"),
+            InlineKeyboardButton(text="Женский", callback_data="subgram_gender_female"),
+        ])
+
+    elif status == "age":
+        text = "Укажите ваш возраст:"
+        age_categories = {
+            "c1": "Младше 10",
+            "c2": "11-13",
+            "c3": "14-15",
+            "c4": "16-17",
+            "c5": "18-24",
+            "c6": "25 и старше",
+        }
+        tmp = []
+        for code, label in age_categories.items():
+            tmp.append(InlineKeyboardButton(text=label, callback_data=f"subgram_age_{code}"))
+            if len(tmp) == 2:
+                rows.append(tmp)
+                tmp = []
+        if tmp:
+            rows.append(tmp)
+
+    elif status == "register":
+        text = "Для продолжения, пожалуйста, пройдите быструю регистрацию."
+        reg_url = response.get("additional", {}).get("registration_url")
+        if reg_url:
+            rows.append([InlineKeyboardButton(text="✅ Пройти регистрацию", web_app=types.WebAppInfo(url=reg_url))])
+            rows.append([InlineKeyboardButton(text="Продолжить", callback_data="subgram-op")])
+        else:
+            # если нет ссылки — не блокируем
+            return True
+
+    if rows:
+        kb = InlineKeyboardMarkup(inline_keyboard=rows)
+        await bot.send_message(chat_id, text, reply_markup=kb)
+        return False
+
+    return True
+
+
+# ====== РАССЫЛКА ======
 async def do_broadcast(admin_id: int, sample_chat_id: int, sample_message_id: int):
-    cursor.execute("SELECT user_id FROM users WHERE blocked=0")
+    # Берём только действительно активных: не заблокирован и не было delivery_failed
+    cursor.execute("SELECT user_id FROM users WHERE blocked=0 AND delivery_failed=0")
     rows = cursor.fetchall()
     user_ids = [r[0] for r in rows if r and r[0]]
 
@@ -246,7 +551,6 @@ async def do_broadcast(admin_id: int, sample_chat_id: int, sample_message_id: in
     forb = 0
     failed = 0
 
-    # создаём запись лога заранее
     cursor.execute("""
         INSERT INTO broadcast_logs(started_at, finished_at, total, sent, forbidden, failed, sample_chat_id, sample_message_id)
         VALUES(?,?,?,?,?,?,?,?)
@@ -254,7 +558,6 @@ async def do_broadcast(admin_id: int, sample_chat_id: int, sample_message_id: in
     log_id = cursor.lastrowid
     conn.commit()
 
-    # Шагаем, уважая лимиты
     for i, uid in enumerate(user_ids, start=1):
         try:
             await bot.copy_message(chat_id=uid, from_chat_id=sample_chat_id, message_id=sample_message_id)
@@ -267,7 +570,8 @@ async def do_broadcast(admin_id: int, sample_chat_id: int, sample_message_id: in
             except TelegramForbiddenError:
                 forb += 1
                 try:
-                    cursor.execute("UPDATE users SET blocked=1 WHERE user_id=?", (uid,))
+                    # помечаем как delivery_failed, но не трогаем manual blocked
+                    cursor.execute("UPDATE users SET delivery_failed=1 WHERE user_id=?", (uid,))
                     conn.commit()
                 except Exception:
                     pass
@@ -276,7 +580,7 @@ async def do_broadcast(admin_id: int, sample_chat_id: int, sample_message_id: in
         except TelegramForbiddenError:
             forb += 1
             try:
-                cursor.execute("UPDATE users SET blocked=1 WHERE user_id=?", (uid,))
+                cursor.execute("UPDATE users SET delivery_failed=1 WHERE user_id=?", (uid,))
                 conn.commit()
             except Exception:
                 pass
@@ -288,7 +592,6 @@ async def do_broadcast(admin_id: int, sample_chat_id: int, sample_message_id: in
         if i % 25 == 0:
             await asyncio.sleep(0.3)
 
-    # финальный апдейт лога
     cursor.execute("""
         UPDATE broadcast_logs
         SET finished_at=?, sent=?, forbidden=?, failed=?
@@ -296,48 +599,40 @@ async def do_broadcast(admin_id: int, sample_chat_id: int, sample_message_id: in
     """, (now_kyiv().isoformat(), sent, forb, failed, log_id))
     conn.commit()
 
+    # Общая стата по базе: учитываем и blocked, и delivery_failed
+    cursor.execute("SELECT COUNT(*) FROM users")
+    total_users_row = cursor.fetchone()
+    total_users = total_users_row[0] if total_users_row and total_users_row[0] is not None else 0
+
+    cursor.execute("SELECT COUNT(*) FROM users WHERE blocked=1 OR delivery_failed=1")
+    blocked_users_row = cursor.fetchone()
+    blocked_users = blocked_users_row[0] if blocked_users_row and blocked_users_row[0] is not None else 0
+
+    active_users = total_users - blocked_users
+
     report = (
-        "📢 <b>Рассылка завершена</b>\n\n"
-        f"Всего получателей: <b>{total}</b>\n"
-        f"Отправлено: <b>{sent}</b>\n"
-        f"Заблокировали бота: <b>{forb}</b>\n"
-        f"Других ошибок: <b>{failed}</b>"
+        "📢 Рассылка завершена\n\n"
+        f"Всего получателей: {total}\n"
+        f"Отправлено: {sent}\n"
+        f"Заблокировали бота: {forb}\n"
+        f"Других ошибок: {failed}\n"
+        f"\nВсего пользователей: {total_users}\n"
+        f"Активных: {active_users}\n"
+        f"Заблокировали бота: {blocked_users}"
     )
     await safe_send_message(admin_id, report, parse_mode="HTML")
+
 
 # ----------------------------------------------------------------------------------
 
 def now_kyiv():
     return datetime.now(timezone(timedelta(hours=3)))
 
+
 def start_of_today_kyiv():
     now = now_kyiv()
     return now.replace(hour=0, minute=0, second=0, microsecond=0)
 
-def gender_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Муж🧑", callback_data="gender_boy"),
-         InlineKeyboardButton(text="Жен👩", callback_data="gender_girl")]
-    ])
-
-def sponsor_keyboard(miss_channels: list) -> InlineKeyboardMarkup:
-    rows = []
-    temp_row = []
-    for i, ch in enumerate(miss_channels, start=1):
-        if isinstance(ch, str) and ch.startswith("http"):
-            url = ch
-        else:
-            display = str(ch).lstrip('@')
-            url = f"https://t.me/{display}"
-        btn = InlineKeyboardButton(text=f"Канал {i}#", url=url)
-        temp_row.append(btn)
-        if len(temp_row) == 2:
-            rows.append(temp_row)
-            temp_row = []
-    if temp_row:
-        rows.append(temp_row)
-    rows.append([InlineKeyboardButton(text="✅Проверить подписку", callback_data="check_subs")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def main_menu_keyboard() -> ReplyKeyboardMarkup:
     kb = ReplyKeyboardMarkup(
@@ -351,8 +646,10 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
     )
     return kb
 
+
 def back_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Назад")]], resize_keyboard=True)
+
 
 def rating_keyboard_single_for(current_timeframe: str) -> InlineKeyboardMarkup:
     if current_timeframe == "24h":
@@ -360,17 +657,20 @@ def rating_keyboard_single_for(current_timeframe: str) -> InlineKeyboardMarkup:
     else:
         return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="За 24 часа", callback_data="rating_24h")]])
 
+
 def withdraw_amount_confirm_kb(user_id: int, amount: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Подтверждаю✅", callback_data=f"confirm_amount:{user_id}:{amount}"),
          InlineKeyboardButton(text="Назад", callback_data="withdraw_back")]
     ])
 
+
 def withdraw_final_confirm_kb(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Подтверждаю✅", callback_data=f"create_withdraw:{user_id}"),
          InlineKeyboardButton(text="Переделать заявку📃", callback_data=f"redo_withdraw_user:{user_id}")]
     ])
+
 
 def admin_withdraw_kb(withdraw_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -380,18 +680,21 @@ def admin_withdraw_kb(withdraw_id: int) -> InlineKeyboardMarkup:
         ]
     ])
 
+
 def admin_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🔄 Обнулить пользователя")],
             [KeyboardButton(text="🚫 Заблокировать / Разблокировать")],
             [KeyboardButton(text="💳 Начислить звезды")],
+            [KeyboardButton(text="⚙️ Изменить награду за реферала")],
             [KeyboardButton(text="📢 Рассылка")],
             [KeyboardButton(text="📈 Статистика пользователей")],
             [KeyboardButton(text="🚪 Выйти из админки")]
         ],
         resize_keyboard=True
     )
+
 
 # ---------------------- УТИЛИТЫ АДМИН-ДИАЛОГА ----------------------
 
@@ -403,6 +706,7 @@ def normalize_username(u: str) -> str:
         u = u[1:]
     return u.lower()
 
+
 def fetch_user_by_username(uname: str):
     uname_norm = normalize_username(uname)
     if not uname_norm:
@@ -410,9 +714,11 @@ def fetch_user_by_username(uname: str):
     cursor.execute("SELECT user_id, username FROM users WHERE lower(username)=?", (uname_norm,))
     return cursor.fetchone()
 
+
 def fetch_user_by_id(uid: int):
     cursor.execute("SELECT user_id, username FROM users WHERE user_id=?", (uid,))
     return cursor.fetchone()
+
 
 def parse_user_ref(text: str):
     t = (text or "").strip()
@@ -432,6 +738,7 @@ def parse_user_ref(text: str):
         return int(row[0]), row[1]
     return None, None
 
+
 # ---------------------- ДОСТУП И АДМИН-КОМАНДЫ ----------------------
 
 async def is_channel_admin(user_id: int, channel_id) -> bool:
@@ -441,6 +748,7 @@ async def is_channel_admin(user_id: int, channel_id) -> bool:
     except Exception:
         return False
 
+
 async def has_admin_access(user_id: int) -> bool:
     if user_id in admin_sessions:
         return True
@@ -448,10 +756,12 @@ async def has_admin_access(user_id: int) -> bool:
         return True
     return False
 
+
 @dp.message(Command("arisadminslipjiko"))
 async def cmd_admin_login(message: types.Message):
     admin_login_states.add(message.from_user.id)
     await safe_answer_message(message, "🔑 Введите пароль для входа в админ-панель (отправьте пароль как обычное сообщение).")
+
 
 @dp.message(Command("exitadmin"))
 async def cmd_exit_admin(message: types.Message):
@@ -463,7 +773,7 @@ async def cmd_exit_admin(message: types.Message):
     else:
         await safe_answer_message(message, "❌ Вы не в админ-панели.")
 
-# Запасной вход в режим рассылки командой
+
 @dp.message(Command("broadcast"))
 async def cmd_broadcast(message: types.Message):
     if not await has_admin_access(message.from_user.id):
@@ -476,45 +786,11 @@ async def cmd_broadcast(message: types.Message):
         reply_markup=admin_menu_kb()
     )
 
+
 @dp.message(Command("myid"))
 async def cmd_myid(message: types.Message):
     await safe_answer_message(message, f"🆔 Твой user_id: {message.from_user.id}")
 
-# ---------- НОВАЯ КОМАНДА: /backup_db (отправка базы админу) ----------
-@dp.message(Command("backup_db"))
-async def cmd_backup_db(message: types.Message):
-    """
-    Админ-команда: /backup_db
-    Отправляет файл базы данных (DB_PATH) как документ.
-    """
-    # только админ / модера
-    if not await has_admin_access(message.from_user.id):
-        await safe_answer_message(message, "❌ У вас нет доступа к этой команде.")
-        return
-
-    try:
-        # проверяем, что файл базы существует
-        if not os.path.exists(DB_PATH):
-            await safe_answer_message(
-                message,
-                f"⚠️ Файл базы не найден по пути:\n{DB_PATH}"
-            )
-            return
-
-        # делаем временную копию, чтобы не трогать живую базу
-        backup_name = "db_backup_for_send.sqlite"
-        shutil.copyfile(DB_PATH, backup_name)
-
-        await message.answer_document(
-            FSInputFile(backup_name),
-            caption="Резервная копия базы данных"
-        )
-    except Exception as e:
-        _qwarn(f"[WARN] backup_db failed: {type(e).__name__}: {e}")
-        await safe_answer_message(
-            message,
-            "⚠️ Не удалось отправить файл базы. Смотри логи на Render."
-        )
 
 @dp.message(lambda m: m.from_user.id in admin_login_states)
 async def admin_password_handler(message: types.Message):
@@ -531,6 +807,7 @@ async def admin_password_handler(message: types.Message):
             "🔄 Обнулить пользователя — кнопка или /restartpikslip <user_id>\n"
             "🚫 Заблокировать / Разблокировать — кнопка или /bensplip <user_id>\n"
             "💳 Начислить звезды — кнопка\n"
+            "⚙️ Изменить награду за реферала — кнопка\n"
             "📢 Рассылка — кнопка или /broadcast\n"
             "📈 Статистика пользователей — кнопка\n"
             "🚪 Выйти из админки — кнопка или /exitadmin",
@@ -538,6 +815,7 @@ async def admin_password_handler(message: types.Message):
         )
     else:
         await safe_answer_message(message, "❌ Неверный пароль. Вход в админ-панель отклонён.")
+
 
 # ---------------------- /start ----------------------
 
@@ -576,6 +854,7 @@ async def start_handler(message: types.Message):
         )
         conn.commit()
 
+        # уведомление о новом входе (как раньше, если без реферала)
         if referrer_id == 0:
             try:
                 joined_disp = await resolve_username_display(user_id)
@@ -588,81 +867,183 @@ async def start_handler(message: types.Message):
                 await notify_admin_channel(admin_text)
             except Exception:
                 pass
-
-        await safe_answer_message(message, "Выберите пол:", reply_markup=gender_keyboard())
-        return
-
-    referral_link = row[8] if row and row[8] else f"https://t.me/{bot_username}?start={user_id}"
-    cursor.execute("UPDATE users SET username=?, referral_link=? WHERE user_id=?", (username, referral_link, user_id))
-    conn.commit()
-
-    miss = await missing_channels(user_id)
-    if not miss:
-        cursor.execute("UPDATE users SET subscribed=1, first_time=0 WHERE user_id=?", (user_id,))
-        conn.commit()
-        await safe_answer_message(message, "🔝 Главное меню", reply_markup=main_menu_keyboard())
     else:
-        cursor.execute("UPDATE users SET subscribed=0, first_time=0 WHERE user_id=?", (user_id,))
+        referral_link = row[8] if row and row[8] else f"https://t.me/{bot_username}?start={user_id}"
+        cursor.execute("UPDATE users SET username=?, referral_link=? WHERE user_id=?", (username, referral_link, user_id))
         conn.commit()
-        await safe_answer_message(
-            message,
-            "Уважаемый пользователь, к сожалению, вы не подписаны на спонсоров😢, попробуйте снова",
-            reply_markup=sponsor_keyboard(miss)
-        )
 
-# ---------------------- Подписки / реферал ----------------------
-
-@dp.callback_query(lambda c: c.data and c.data.startswith("gender_"))
-async def gender_chosen(callback: types.CallbackQuery):
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
-    miss = await missing_channels(callback.from_user.id)
-    await safe_answer_message(callback.message, "Подпишись на спонсоров:", reply_markup=sponsor_keyboard(miss))
-    await callback.answer()
-
-@dp.callback_query(lambda c: c.data == "check_subs")
-async def check_subscriptions(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    username = callback.from_user.username or "None"
-
-    cursor.execute("SELECT blocked FROM users WHERE user_id=?", (user_id,))
-    b = cursor.fetchone()
-    if b and b[0] == 1:
-        await callback.answer("Вы заблокированы администратором.", show_alert=True)
+    # На /start сначала проверяем SubGram + твоих спонсоров
+    ok = await ensure_subscribed(user_id, message)
+    if not ok:
+        # SubGram и/или ручные спонсоры уже показали задания — ждём действий пользователя
         return
 
-    cursor.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
-    row_user = cursor.fetchone()
-    if not row_user:
-        await callback.answer()
-        return
+    # Если уже подписан и всё ок — просто показать меню
+    await safe_answer_message(message, "🔝 Главное меню", reply_markup=main_menu_keyboard())
 
-    miss = await missing_channels(user_id)
 
-    if await is_subscribed_all(user_id):
-        cursor.execute("UPDATE users SET subscribed=1 WHERE user_id=?", (user_id,))
-        conn.commit()
+# ---------------------- Рейтинг / инфо / выводы и т.д. ----------------------
+
+async def build_rating_text(time_frame: str):
+    """
+    Строим текст рейтинга, используя ИМЯ ПРОФИЛЯ (first_name + last_name),
+    а не @username.
+    """
+    cur = conn.cursor()
+
+    if time_frame == "24h":
+        start_day = start_of_today_kyiv()
+        end_day = start_day + timedelta(days=1)
+        cur.execute("""
+            SELECT u.user_id, COUNT(r.referred_id)
+            FROM referral_rewards r
+            JOIN users u ON r.referrer_id = u.user_id
+            WHERE r.rewarded_at BETWEEN ? AND ?
+            GROUP BY r.referrer_id
+            ORDER BY COUNT(r.referred_id) DESC
+            LIMIT 10
+        """, (start_day.isoformat(), end_day.isoformat()))
+        title = "🫂 Топ по рефералам за 24ч:\n\n"
+    else:
+        cur.execute("""
+            SELECT u.user_id, COUNT(r.referred_id)
+            FROM referral_rewards r
+            JOIN users u ON r.referrer_id = u.user_id
+            GROUP BY r.referrer_id
+            ORDER BY COUNT(r.referred_id) DESC
+            LIMIT 10
+        """)
+        title = "🫂 Топ по рефералам за всё время:\n\n"
+
+    rows = cur.fetchall()
+
+    if not rows:
+        return title + "Нет данных"
+
+    result = title
+
+    for i, row in enumerate(rows, 1):
+        uid, cnt = row
         try:
-            await callback.message.delete()
+            chat = await bot.get_chat(uid)
+            full_name = f"{chat.first_name or ''} {chat.last_name or ''}".strip()
+            if not full_name:
+                full_name = chat.username or str(uid)
+        except Exception:
+            full_name = str(uid)
+
+        result += f"{i}. {full_name} — {cnt} рефералов\n"
+
+    return result
+
+
+async def send_rating(user_id: int, time_frame: str, old_msg: types.Message = None):
+    now_dt = datetime.now()
+    last_time = last_rating_click.get(user_id)
+    if last_time and (now_dt - last_time).total_seconds() < 2:
+        return
+    last_rating_click[user_id] = now_dt
+
+    text = await build_rating_text(time_frame)
+    kb = rating_keyboard_single_for(time_frame)
+
+    if old_msg:
+        try:
+            await old_msg.delete()
         except Exception:
             pass
 
+    await send_photo_caption(user_id, RATING_IMG_PATH, text, reply_markup=kb, parse_mode="HTML")
+
+
+@dp.callback_query(lambda c: c.data in ["rating_24h", "rating_all"])
+async def rating_callbacks(callback: types.CallbackQuery):
+    tf = "24h" if callback.data == "rating_24h" else "all"
+    text = await build_rating_text(tf)
+    kb = rating_keyboard_single_for(tf)
+    try:
+        await callback.message.edit_caption(caption=text, reply_markup=kb, parse_mode="HTML")
+    except Exception:
+        try:
+            await send_photo_caption(callback.from_user.id, RATING_IMG_PATH, text, reply_markup=kb, parse_mode="HTML")
+        except Exception:
+            await safe_answer_message(callback.message, text, reply_markup=kb, parse_mode="HTML")
+    await callback.answer()
+
+
+# ---------- Общий хелпер: SubGram + рефералка + ручные спонсоры ----------
+
+async def ensure_subscribed(user_id: int, carrier, skip_subgram: bool = False) -> bool:
+    """
+    Быстрая проверка доступа:
+    1) SubGram (если не skip_subgram).
+    2) Проверка ТВОИХ ручных спонсоров.
+    3) Если всё ок — отмечаем в БД, один раз выдаём приветствие и реф-награду.
+    """
+    user: types.User | None = None
+    chat_id: int | None = None
+
+    if isinstance(carrier, types.Message):
+        user = carrier.from_user
+        chat_id = carrier.chat.id
+    elif isinstance(carrier, types.CallbackQuery):
+        user = carrier.from_user
+        chat_id = carrier.message.chat.id
+
+    # Шаг 1. SubGram
+    if not skip_subgram and user and chat_id:
+        ok_sub = await process_subgram_check(user, chat_id)
+        if not ok_sub:
+            return False
+
+    # Шаг 1.5. Ручные спонсоры
+    if user and chat_id:
+        ok_manual = await process_manual_sponsors(user, chat_id)
+        if not ok_manual:
+            return False
+
+    # Шаг 2. Отметить подписку и, если первый раз, выдать приветствие + рефералку
+    cursor.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
+    row_user = cursor.fetchone()
+    if not row_user:
+        # на всякий случай, если кто-то написал, не пройдя /start
+        return True
+
+    subscribed_flag = row_user[2] or 0
+    username = row_user[1] or "None"
+    referrer_id = row_user[7]
+
+    if not subscribed_flag:
+        # Обновляем флаг
+        cursor.execute("UPDATE users SET subscribed=1, first_time=0 WHERE user_id=?", (user_id,))
+        conn.commit()
+
+        # Приветствие
         await safe_send_message(user_id, "⭐️")
-        await safe_send_message(user_id, "✅ Спасибо за подписку! Мы рады, что вы выбрали именно нас!", reply_markup=main_menu_keyboard())
         await safe_send_message(
             user_id,
-            "<b>🤍Рады приветствовать тебя в нашем боте!\n\n С помощью нашего бота ты сможешь зарабатывать красивые подарки для себя,или же порадовать близких совершенно бесплатно!💫\n\nТвоя задача,просто приглашать друзей по своей реферальной ссылке и лутать звезды,ВСЕ!\n\n👤Скорее жми «Заработать звезды🌟» чтобы заработать звезды</b>",
+            "✅ Спасибо за подписку! Мы рады, что вы выбрали именно нас!",
+            reply_markup=main_menu_keyboard()
+        )
+        await safe_send_message(
+            user_id,
+            "<b>🤍Рады приветствовать тебя в нашем боте!\n\n"
+            "С помощью нашего бота ты сможешь зарабатывать красивые подарки для себя, "
+            "или же порадовать близких совершенно бесплатно!💫\n\n"
+            "Твоя задача, просто приглашать друзей по своей реферальной ссылке и лутать звезды, ВСЕ!\n\n"
+            "👤Скорее жми «Заработать звезды🌟» чтобы заработать звезды</b>",
             parse_mode="HTML"
         )
 
-        referrer_id = row_user[7]
-        ref_disp = await resolve_username_display(referrer_id) if referrer_id else "—"
-        joined_disp = await resolve_username_display(user_id)
-
+        # Реферальная логика (1 раз)
         if referrer_id and referrer_id != user_id:
-            cursor.execute("SELECT rewarded FROM referral_rewards WHERE referrer_id=? AND referred_id=?", (referrer_id, user_id))
+            ref_disp = await resolve_username_display(referrer_id)
+            joined_disp = await resolve_username_display(user_id)
+
+            cursor.execute(
+                "SELECT rewarded FROM referral_rewards WHERE referrer_id=? AND referred_id=?",
+                (referrer_id, user_id)
+            )
             reward_row = cursor.fetchone()
             if not reward_row:
                 cursor.execute("SELECT user_id FROM users WHERE user_id=?", (referrer_id,))
@@ -674,8 +1055,10 @@ async def check_subscriptions(callback: types.CallbackQuery):
                         SET balance = balance + ?, total_earned = total_earned + ?, referrals_count = referrals_count + 1
                         WHERE user_id=?
                     """, (REFERRAL_REWARD, REFERRAL_REWARD, referrer_id))
-                    cursor.execute("INSERT INTO referral_rewards(referrer_id, referred_id, rewarded, rewarded_at) VALUES(?,?,1,?)",
-                                   (referrer_id, user_id, now_kyiv().isoformat()))
+                    cursor.execute("""
+                        INSERT INTO referral_rewards(referrer_id, referred_id, rewarded, rewarded_at)
+                        VALUES(?,?,1,?)
+                    """, (referrer_id, user_id, now_kyiv().isoformat()))
                     conn.commit()
 
                     cursor.execute("SELECT referrals_count FROM users WHERE user_id=?", (referrer_id,))
@@ -683,12 +1066,23 @@ async def check_subscriptions(callback: types.CallbackQuery):
                     if rref and rref[0] is not None:
                         ref_count = rref[0]
                         if ref_count % REFERRAL_BONUS_EVERY == 0:
-                            cursor.execute("UPDATE users SET balance = balance + ?, total_earned = total_earned + ? WHERE user_id=?",
-                                           (REFERRAL_BONUS_AMOUNT, REFERRAL_BONUS_AMOUNT, referrer_id))
+                            cursor.execute("""
+                                UPDATE users
+                                SET balance = balance + ?, total_earned = total_earned + ?
+                                WHERE user_id=?
+                            """, (REFERRAL_BONUS_AMOUNT, REFERRAL_BONUS_AMOUNT, referrer_id))
                             conn.commit()
-                            await safe_send_message(referrer_id, f"🎉 Поздравляем! Вы пригласили {ref_count} новых пользователей!\nВ качестве бонуса начислено {REFERRAL_BONUS_AMOUNT}.0 ⭐️")
+                            await safe_send_message(
+                                referrer_id,
+                                f"🎉 Поздравляем! Вы пригласили {ref_count} новых пользователей!\n"
+                                f"В качестве бонуса начислено {REFERRAL_BONUS_AMOUNT}.0 ⭐️"
+                            )
 
-                    await safe_send_message(referrer_id, f"📲 Новый пользователь @{username} зарегистрировался по вашей ссылке!\n- Зачислено {REFERRAL_REWARD}.0 ⭐️")
+                    await safe_send_message(
+                        referrer_id,
+                        f"📲 Новый пользователь @{username} зарегистрировался по вашей ссылке!\n"
+                        f"- Зачислено {REFERRAL_REWARD}.0 ⭐️"
+                    )
 
                     await notify_admin_channel(
                         "👥 <b>Реф-подтверждение</b>\n"
@@ -697,8 +1091,10 @@ async def check_subscriptions(callback: types.CallbackQuery):
                         f"🕒 {now_kyiv().isoformat()}"
                     )
                 else:
-                    cursor.execute("INSERT INTO referral_rewards(referrer_id, referred_id, rewarded, rewarded_at) VALUES(?,?,0,?)",
-                                   (referrer_id, user_id, now_kyiv().isoformat()))
+                    cursor.execute("""
+                        INSERT INTO referral_rewards(referrer_id, referred_id, rewarded, rewarded_at)
+                        VALUES(?,?,0,?)
+                    """, (referrer_id, user_id, now_kyiv().isoformat()))
                     conn.commit()
                     await notify_admin_channel(
                         "👥 <b>Реф-подтверждение</b>\n"
@@ -706,130 +1102,48 @@ async def check_subscriptions(callback: types.CallbackQuery):
                         f"👤 Вошёл: {joined_disp} (ID: <code>{user_id}</code>)\n"
                         f"🕒 {now_kyiv().isoformat()}"
                     )
-    else:
-        try:
-            await callback.message.delete()
-        except Exception:
-            pass
-        await safe_send_message(callback.from_user.id, "Уважаемый пользователь, к сожалению, вы не подписаны на спонсоров😢, попробуйте снова:", reply_markup=sponsor_keyboard(miss))
-    await callback.answer()
 
-# ---------------------- Прочее (рейтинг/кнопки/выводы) ----------------------
-
-def classify_channel_sync(channel) -> str:
-    try:
-        if isinstance(channel, str) and channel.startswith("http"):
-            return "invite"
-        if isinstance(channel, str) and channel.startswith('-') and channel[1:].isdigit():
-            return "private"
-        display = str(channel).lstrip('@')
-        if display.lower().endswith("bot"):
-            return "bot"
-        return "public"
-    except Exception:
-        return "unknown"
-
-async def missing_channels(user_id: int) -> list:
-    miss = []
-    for channel in CHANNELS_TO_CHECK:
-        try:
-            if isinstance(channel, str) and channel.startswith("http"):
-                miss.append(channel)
-                continue
-            if isinstance(channel, str) and channel.startswith('-') and channel[1:].isdigit():
-                chat_id = int(channel)
-            else:
-                chat_id = channel
-            member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
-            if member.status not in [ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR]:
-                miss.append(channel)
-        except Exception:
-            miss.append(channel)
-    return miss
-
-async def is_subscribed_all(user_id: int) -> bool:
-    for channel in CHANNELS_TO_CHECK:
-        try:
-            ch_type = classify_channel_sync(channel)
-            if ch_type in ("bot", "invite", "private"):
-                continue
-            if isinstance(channel, str) and channel.startswith('-') and channel[1:].isdigit():
-                chat_id = int(channel)
-            else:
-                chat_id = channel
-            member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
-            if member.status not in [ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR]:
-                return False
-        except Exception:
-            return False
     return True
 
-def build_rating_text(time_frame: str):
-    cur = conn.cursor()
-    if time_frame == "24h":
-        start_day = start_of_today_kyiv()
-        end_day = start_day + timedelta(days=1)
-        cur.execute("""
-            SELECT u.username, COUNT(r.referred_id)
-            FROM referral_rewards r
-            JOIN users u ON r.referrer_id = u.user_id
-            WHERE r.rewarded_at BETWEEN ? AND ?
-            GROUP BY r.referrer_id
-            ORDER BY COUNT(r.referred_id) DESC
-            LIMIT 10
-        """, (start_day.isoformat(), end_day.isoformat()))
-        text = "🫂 Топ по рефералам за 24ч:\n\n"
-    else:
-        cur.execute("""
-            SELECT u.username, COUNT(r.referred_id)
-            FROM referral_rewards r
-            JOIN users u ON r.referrer_id = u.user_id
-            GROUP BY r.referrer_id
-            ORDER BY COUNT(r.referred_id) DESC
-            LIMIT 10
-        """)
-        text = "🫂 Топ по рефералам за всё время:\n\n"
 
-    rows = cur.fetchall()
-    if not rows:
-        text += "Нет данных"
-    else:
-        for i, row in enumerate(rows, 1):
-            uname = row[0] or "None"
-            text += f"{i}. {uname} - {row[1]} рефералов\n"
-    return text
+# ---------------------- SubGram callback-и ----------------------
 
-async def send_rating(user_id: int, time_frame: str, old_msg: types.Message = None):
-    now_dt = datetime.now()
-    last_time = last_rating_click.get(user_id)
-    if last_time and (now_dt - last_time).total_seconds() < 2:
-        return
-    last_rating_click[user_id] = now_dt
-
-    text = build_rating_text(time_frame)
-    kb = rating_keyboard_single_for(time_frame)
-
-    if old_msg:
-        try:
-            await old_msg.delete()
-        except Exception:
-            pass
-
-    await send_photo_caption(user_id, RATING_IMG_PATH, text, reply_markup=kb, parse_mode="HTML")
-
-@dp.callback_query(lambda c: c.data in ["rating_24h", "rating_all"])
-async def rating_callbacks(callback: types.CallbackQuery):
-    tf = "24h" if callback.data == "rating_24h" else "all"
-    text = build_rating_text(tf)
-    kb = rating_keyboard_single_for(tf)
+@dp.callback_query(lambda c: c.data and c.data.startswith("subgram"))
+async def subgram_callbacks(callback: types.CallbackQuery):
+    """
+    Обработка callback-ов от SubGram и общей проверки:
+    - subgram-op
+    - subgram_gender_*
+    - subgram_age_*
+    """
     try:
-        await callback.message.edit_caption(caption=text, reply_markup=kb, parse_mode="HTML")
+        await callback.message.delete()
+    except TelegramBadRequest:
+        pass
     except Exception:
-        try:
-            await send_photo_caption(callback.from_user.id, RATING_IMG_PATH, text, reply_markup=kb, parse_mode="HTML")
-        except Exception:
-            await safe_answer_message(callback.message, text, reply_markup=kb, parse_mode="HTML")
+        pass
+
+    data = callback.data
+    api_kwargs: dict = {}
+
+    if data.startswith("subgram_gender_"):
+        api_kwargs["gender"] = data.split("_")[2]
+    elif data.startswith("subgram_age_"):
+        api_kwargs["age"] = data.split("_")[2]
+    # для subgram-op api_kwargs остаётся пустым
+
     await callback.answer()
+
+    # повторно идём в SubGram с уточнением пола/возраста или проверкой подписки
+    ok_sub = await process_subgram_check(callback.from_user, callback.message.chat.id, api_kwargs)
+    if not ok_sub:
+        return
+
+    # SubGram дал зелёный свет -> проверяем ручных спонсоров и рефку
+    ok_our = await ensure_subscribed(callback.from_user.id, callback, skip_subgram=True)
+    if ok_our:
+        await callback.message.answer("✅ Доступ предоставлен!", reply_markup=main_menu_keyboard())
+
 
 # ---------------------- Главный меню-хендлер ----------------------
 
@@ -861,20 +1175,21 @@ async def main_menu_handler(message: types.Message):
         "🔄 Обнулить пользователя",
         "🚫 Заблокировать / Разблокировать",
         "💳 Начислить звезды",
+        "⚙️ Изменить награду за реферала",
         "📢 Рассылка",
         "📈 Статистика пользователей",
     }
     if text in nav_buttons:
         admin_actions.pop(uid, None)
 
-    # ----- Новая кнопка: статистика пользователей -----
     if text == "📈 Статистика пользователей":
         if not await has_admin_access(uid):
             await safe_answer_message(message, "❌ У вас нет доступа.")
             return
         cursor.execute("SELECT COUNT(*) FROM users")
         total = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM users WHERE blocked=1")
+        # считаем заблоченных и теми, у кого delivery_failed=1 (бота реально заблочили)
+        cursor.execute("SELECT COUNT(*) FROM users WHERE blocked=1 OR delivery_failed=1")
         blocked = cursor.fetchone()[0]
         active = total - blocked
         msg = (
@@ -883,6 +1198,19 @@ async def main_menu_handler(message: types.Message):
             f"Заблокировали бота: {blocked}"
         )
         await safe_answer_message(message, msg, reply_markup=admin_menu_kb())
+        return
+
+    if text == "⚙️ Изменить награду за реферала":
+        if not await has_admin_access(uid):
+            await safe_answer_message(message, "❌ У вас нет доступа.")
+            return
+        admin_actions[uid] = {"mode": "set_ref_reward", "await": "value"}
+        await safe_answer_message(
+            message,
+            f"⚙️ Текущая награда за реферала: {REFERRAL_REWARD}⭐️.\n\n"
+            "Введите новое количество звёзд (целое число, например 4 или 5):",
+            reply_markup=admin_menu_kb()
+        )
         return
 
     if await maybe_handle_admin_dialog(message):
@@ -953,6 +1281,7 @@ async def main_menu_handler(message: types.Message):
                 await safe_answer_message(message, "Мы выводим только выводы на суммы: <b>15⭐️, 25⭐️, 50⭐️ и 100⭐️</b>", reply_markup=back_keyboard(), parse_mode="HTML")
                 return
             cursor.execute("SELECT balance FROM users WHERE user_id=?", (user_id,))
+
             r = cursor.fetchone()
             balance = float(r[0]) if r and r[0] is not None else 0.0
             if amount > balance:
@@ -1010,9 +1339,9 @@ async def main_menu_handler(message: types.Message):
             await safe_answer_message(message, "Сначала начните работу с ботом через /start")
             return
 
-        if row[2] == 0:
-            miss = await missing_channels(user_id)
-            await safe_answer_message(message, "Уважаемый пользователь, к сожалению, вы не подписаны на спонсоров😢, попробуйте снова", reply_markup=sponsor_keyboard(miss))
+        # 🔴 Сначала SubGram + ручные спонсоры
+        ok = await ensure_subscribed(user_id, message)
+        if not ok:
             return
 
         if text == "Заработать звезды🌟":
@@ -1075,6 +1404,7 @@ async def main_menu_handler(message: types.Message):
 
         elif text == "Вывести звезды✨":
             cursor.execute("SELECT balance FROM users WHERE user_id=?", (user_id,))
+
             rb = cursor.fetchone()
             balance = float(rb[0]) if rb and rb[0] is not None else 0.0
             caption = (
@@ -1088,6 +1418,7 @@ async def main_menu_handler(message: types.Message):
         return
 
     await safe_answer_message(message, "🔝 Главное меню", reply_markup=main_menu_keyboard())
+
 
 # ---------------------- Админ-диалог ----------------------
 
@@ -1121,7 +1452,7 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
             await safe_answer_message(
                 message,
                 "✅ Сообщение получено.\n\nНапишите «да» для подтверждения рассылки всем пользователям в базе, либо «отмена».",
-                reply_markup=admin_menu_kk()
+                reply_markup=admin_menu_kb()
             )
             return True
 
@@ -1136,6 +1467,26 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
             else:
                 await safe_answer_message(message, "Не понял. Напишите «да» для запуска рассылки или «отмена».", reply_markup=admin_menu_kb())
                 return True
+
+    # ===== Режим изменения награды за реферала
+    if mode == "set_ref_reward" and step == "value":
+        try:
+            new_reward = int((message.text or "").strip())
+        except Exception:
+            await safe_answer_message(message, "❗ Введите целое число (например: 4 или 5).", reply_markup=admin_menu_kb())
+            return True
+        if new_reward <= 0:
+            await safe_answer_message(message, "❗ Награда должна быть положительным числом.", reply_markup=admin_menu_kb())
+            return True
+
+        set_referral_reward(new_reward)
+        admin_actions.pop(uid, None)
+        await safe_answer_message(
+            message,
+            f"✅ Новая награда за реферала установлена: {new_reward}⭐️",
+            reply_markup=admin_menu_kb()
+        )
+        return True
 
     # ===== Остальные режимы (reset/toggle/grant)
     if step == "user":
@@ -1165,7 +1516,7 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
             conn.commit()
             status_text = "заблокирован" if new_status == 1 else "разблокирован"
             admin_actions.pop(uid, None)
-            await safe_answer_message(message, f"🚫 Пользователь {target_id} {status_text}.", reply_markup=admin_menu_kb())
+            await safe_answer_message(message, f"🚫 Пользователь {target_id} {status_text}.", reply_markup=admin_menu_kб())
             return True
 
         if mode == "grant":
@@ -1206,6 +1557,7 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
     await safe_answer_message(message, "❗ Неверный ввод. Пришлите @username или user_id, либо «отмена».", reply_markup=admin_menu_kb())
     return True
 
+
 # ---------------------- Выводы (callbacks) ----------------------
 
 @dp.callback_query(lambda c: c.data and (c.data.startswith("confirm_amount:") or c.data == "withdraw_back" or c.data.startswith("create_withdraw:") or c.data.startswith("redo_withdraw_user:")))
@@ -1229,7 +1581,7 @@ async def withdraw_confirm_handlers(callback: types.CallbackQuery):
             _, uid_s, amount_s = parts
             uid = int(uid_s)
             amount = int(amount_s)
-        except:
+        except Exception:
             await callback.answer()
             return
         if uid != user_id:
@@ -1254,7 +1606,7 @@ async def withdraw_confirm_handlers(callback: types.CallbackQuery):
         try:
             _, uid_s = parts
             uid = int(uid_s)
-        except:
+        except Exception:
             await callback.answer()
             return
         if uid != user_id:
@@ -1327,7 +1679,7 @@ async def withdraw_confirm_handlers(callback: types.CallbackQuery):
         try:
             _, uid_s = parts
             uid = int(uid_s)
-        except:
+        except Exception:
             await callback.answer()
             return
         if uid != user_id:
@@ -1348,6 +1700,7 @@ async def withdraw_confirm_handlers(callback: types.CallbackQuery):
         await callback.answer()
         return
 
+
 @dp.callback_query(lambda c: c.data and (c.data.startswith("admin_paid:") or c.data.startswith("admin_reject:")))
 async def admin_withdraw_handlers(callback: types.CallbackQuery):
     user_id = callback.from_user.id
@@ -1360,7 +1713,7 @@ async def admin_withdraw_handlers(callback: types.CallbackQuery):
     try:
         _, withdraw_id_s = parts
         withdraw_id = int(withdraw_id_s)
-    except:
+    except Exception:
         await callback.answer()
         return
 
@@ -1404,31 +1757,14 @@ async def admin_withdraw_handlers(callback: types.CallbackQuery):
         await safe_edit_text(callback.message, (callback.message.text or "") + "\n\n❌ Отклонено")
         return
 
-# ---------------------- ВЕБ-СЕРВЕР ДЛЯ PORT (Render) ----------------------
-
-async def handle_root(request):
-    return web.Response(text="Bot is running")
-
-async def start_web_app():
-    app = web.Application()
-    app.router.add_get("/", handle_root)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-    if not QUIET_LOGGING:
-        print(f"Web server started on port {PORT}")
 
 # ---------------------- MAIN ----------------------
 
 async def main():
     if not QUIET_LOGGING:
         print("Бот запускается...")
-        print(f"DB_PATH = {DB_PATH}")
-        print(f"PORT = {PORT}")
-    # запускаем веб-сервер (для Render) и бота-поллинг параллельно
-    asyncio.create_task(start_web_app())
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
