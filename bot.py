@@ -1187,10 +1187,14 @@ async def main_menu_handler(message: types.Message):
             await safe_answer_message(message, "❌ У вас нет доступа.")
             return
         cursor.execute("SELECT COUNT(*) FROM users")
-        total = cursor.fetchone()[0]
-        # считаем заблоченных и теми, у кого delivery_failed=1 (бота реально заблочили)
+        total_row = cursor.fetchone()
+        total = total_row[0] if total_row and total_row[0] is not None else 0
+
+        # считаем заблоченных админом И тех, у кого рассылка падала (delivery_failed)
         cursor.execute("SELECT COUNT(*) FROM users WHERE blocked=1 OR delivery_failed=1")
-        blocked = cursor.fetchone()[0]
+        blocked_row = cursor.fetchone()
+        blocked = blocked_row[0] if blocked_row and blocked_row[0] is not None else 0
+
         active = total - blocked
         msg = (
             f"Всего пользователей: {total}\n"
@@ -1516,7 +1520,7 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
             conn.commit()
             status_text = "заблокирован" if new_status == 1 else "разблокирован"
             admin_actions.pop(uid, None)
-            await safe_answer_message(message, f"🚫 Пользователь {target_id} {status_text}.", reply_markup=admin_menu_kб())
+            await safe_answer_message(message, f"🚫 Пользователь {target_id} {status_text}.", reply_markup=admin_menu_kb())
             return True
 
         if mode == "grant":
