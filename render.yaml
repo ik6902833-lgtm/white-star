@@ -1,16 +1,16 @@
 services:
-  - type: web
-    name: white-star
+  - type: worker
+    name: star-bot
     env: python
-    plan: free
+    plan: free            # можно поменять, если будешь брать платный
     buildCommand: "pip install -r requirements.txt"
     startCommand: "python bot.py"
     envVars:
       - key: API_TOKEN
-        sync: false
-      - key: ADMIN_PASSWORD
+        sync: false       # токен задашь в настройках Render
+      - key: SUBGRAM_API_KEY
         sync: false
       - key: NEW_ADMIN_CHANNEL
-        sync: false
-      - key: DB_PATH
-        sync: false
+        value: "sdafsadfsdaf13"
+      - key: CHANNEL_FOR_WITHDRAW
+        value: "-1003003114178"
