@@ -2,12 +2,19 @@ services:
   - type: worker
     name: star-bot
     env: python
-    plan: starter          # раньше было free, теперь Starter
+    region: frankfurt
+    plan: starter
     buildCommand: "pip install -r requirements.txt"
     startCommand: "python bot.py"
+
+    disk:
+      name: star-disk
+      mountPath: /data
+      sizeGB: 1
+
     envVars:
       - key: API_TOKEN
-        sync: false        # значение задашь в настройках сервиса на Render
+        sync: false
       - key: SUBGRAM_API_KEY
         sync: false
       - key: NEW_ADMIN_CHANNEL
