@@ -19,7 +19,7 @@ from aiogram.types import (
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter, TelegramBadRequest
 
 API_TOKEN = "8362669039:AAEWLqgAD01xRUMkU4_Hn341j2BrqnaM_TI"
-DB_PATH = "users.db"
+DB_PATH = "/data/users.db"
 
 # (значение оставлено как просили; нормализация выполняется в notify_admin_channel)
 NEW_ADMIN_CHANNEL = "sdafsadfsdaf13"
@@ -1772,3 +1772,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
