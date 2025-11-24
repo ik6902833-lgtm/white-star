@@ -2,12 +2,12 @@ services:
   - type: worker
     name: star-bot
     env: python
-    plan: free            # можно поменять, если будешь брать платный
+    plan: starter          # раньше было free, теперь Starter
     buildCommand: "pip install -r requirements.txt"
     startCommand: "python bot.py"
     envVars:
       - key: API_TOKEN
-        sync: false       # токен задашь в настройках Render
+        sync: false        # значение задашь в настройках сервиса на Render
       - key: SUBGRAM_API_KEY
         sync: false
       - key: NEW_ADMIN_CHANNEL
