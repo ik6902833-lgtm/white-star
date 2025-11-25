@@ -40,9 +40,12 @@ SPONSORS_REQUIRED = [
     ("@WhiteStarXInfo", "@WhiteStarXInfo"),  # открытый канал, проверяем напрямую
 ]
 
-SPONSORS_OPTIONAL = [
-    ("https://t.me/+OrchFu8r2vNjZjhk", None),  # просто клик, без проверки
-]
+# раньше было:
+# SPONSORS_OPTIONAL = [
+#     ("https://t.me/+OrchFu8r2vNjZjhk", None),  # просто клик, без проверки
+# ]
+
+SPONSORS_OPTIONAL = []  # опциональных спонсоров сейчас нет
 
 # ---------- SubGram настройки ----------
 SUBGRAM_API_KEY = "e263a455ef68c942129a72539abe515457c5df8f840cf4e333c4777e1e66a789"
@@ -1772,4 +1775,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
