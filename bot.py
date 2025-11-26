@@ -318,6 +318,10 @@ async def gather_manual_sponsors(user_id: int):
     Возвращает:
       required_missing: ссылки на обязательные каналы, на которые пользователь НЕ подписан
       optional_links: все дополнительные (опциональные) ссылки
+
+    ВАЖНО: если бот не может проверить подписку (TelegramBadRequest — нет прав,
+    бот не админ и т.п.), мы НЕ добавляем канал в required_missing и не
+    зацикливаем пользователя на «вы не подписаны».
     """
     required_missing = []
     optional_links = []
@@ -327,6 +331,7 @@ async def gather_manual_sponsors(user_id: int):
         url = make_tg_url(open_link or check_target)
         chat_to_check = normalize_chat_target(check_target or open_link)
         need_button = False
+
         if chat_to_check:
             try:
                 member = await bot.get_chat_member(chat_id=chat_to_check, user_id=user_id)
@@ -335,10 +340,17 @@ async def gather_manual_sponsors(user_id: int):
                     ChatMemberStatus.ADMINISTRATOR,
                     ChatMemberStatus.CREATOR,
                 ):
+                    # пользователь реально не подписан
                     need_button = True
-            except Exception:
-                # на ошибке тоже выводим кнопку, чтобы пользователь сам подписался
+            except TelegramBadRequest as e:
+                # бот не может проверить подписку → НЕ блокируем
+                _qwarn(f"[WARN] get_chat_member failed for {chat_to_check}: {e}")
+                need_button = False
+            except Exception as e:
+                # любая другая ошибка — считаем, что подписки нет (подстраховка)
+                _qwarn(f"[WARN] get_chat_member unexpected error for {chat_to_check}: {type(e).__name__}")
                 need_button = True
+
         if need_button and url:
             required_missing.append(url)
 
@@ -360,7 +372,7 @@ async def process_manual_sponsors(user: types.User, chat_id: int) -> bool:
     """
     required_missing, optional_links = await gather_manual_sponsors(user.id)
     if not required_missing:
-        # все обязательные каналы уже подписаны
+        # все обязательные каналы уже подписаны (или бот не может проверить)
         return True
 
     # собираем все ссылки, которые нужно показать
@@ -1340,7 +1352,7 @@ async def main_menu_handler(message: types.Message):
     ]
 
     if text in menu_buttons:
-        cursor.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
+        cursor.execute("SELECT * FROM users WHERE user_id=?", (user_id,)))
         row = cursor.fetchone()
         if not row:
             await safe_answer_message(message, "Сначала начните работу с ботом через /start")
@@ -1411,7 +1423,6 @@ async def main_menu_handler(message: types.Message):
 
         elif text == "Вывести звезды✨":
             cursor.execute("SELECT balance FROM users WHERE user_id=?", (user_id,))
-
             rb = cursor.fetchone()
             balance = float(rb[0]) if rb and rb[0] is not None else 0.0
             caption = (
@@ -1521,7 +1532,7 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
             new_status = 0 if row[0] == 1 else 1
             cursor.execute("UPDATE users SET blocked=? WHERE user_id=?", (new_status, target_id))
             conn.commit()
-            status_text = "заблокирован" if new_status == 1 else "разблокирован"
+            status_text = "заблокирован" если new_status == 1 else "разблокирован"
             admin_actions.pop(uid, None)
             await safe_answer_message(message, f"🚫 Пользователь {target_id} {status_text}.", reply_markup=admin_menu_kb())
             return True
@@ -1628,7 +1639,7 @@ async def withdraw_confirm_handlers(callback: types.CallbackQuery):
 
         cursor.execute("SELECT balance FROM users WHERE user_id=?", (user_id,))
         r = cursor.fetchone()
-        balance = float(r[0]) if r and r[0] is not None else 0.0
+        balance = float(r[0]) если r and r[0] is not None else 0.0
         if amount > balance:
             user_states.pop(user_id, None)
             try:
@@ -1775,5 +1786,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
