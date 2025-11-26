@@ -458,7 +458,7 @@ async def process_subgram_check(user: types.User, chat_id: int, api_kwargs: dict
     # если статус не блокирующий — даём доступ дальше
     if not status or status not in SUBGRAM_BLOCKING_STATUSES:
         if status == "error":
-            _qwarn(f"[WARN] SubGram error: {response.get('message')}")
+            _qwarn(f"[WARN] SubGram error: {response.get("message")}")
         return True
 
     text = ""
@@ -941,7 +941,7 @@ async def build_rating_text(time_frame: str):
         uid, cnt = row
         try:
             chat = await bot.get_chat(uid)
-            full_name = f"{chat.first_name or ''} {chat.last_name or ''}".strip()
+            full_name = f"{chat.first_name or ""} {chat.last_name or ""}".strip()
             if not full_name:
                 full_name = chat.username or str(uid)
         except Exception:
@@ -1352,7 +1352,7 @@ async def main_menu_handler(message: types.Message):
     ]
 
     if text in menu_buttons:
-        cursor.execute("SELECT * FROM users WHERE user_id=?", (user_id,)))
+        cursor.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
         row = cursor.fetchone()
         if not row:
             await safe_answer_message(message, "Сначала начните работу с ботом через /start")
@@ -1532,7 +1532,7 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
             new_status = 0 if row[0] == 1 else 1
             cursor.execute("UPDATE users SET blocked=? WHERE user_id=?", (new_status, target_id))
             conn.commit()
-            status_text = "заблокирован" если new_status == 1 else "разблокирован"
+            status_text = "заблокирован" if new_status == 1 else "разблокирован"
             admin_actions.pop(uid, None)
             await safe_answer_message(message, f"🚫 Пользователь {target_id} {status_text}.", reply_markup=admin_menu_kb())
             return True
@@ -1639,7 +1639,7 @@ async def withdraw_confirm_handlers(callback: types.CallbackQuery):
 
         cursor.execute("SELECT balance FROM users WHERE user_id=?", (user_id,))
         r = cursor.fetchone()
-        balance = float(r[0]) если r and r[0] is not None else 0.0
+        balance = float(r[0]) if r and r[0] is not None else 0.0
         if amount > balance:
             user_states.pop(user_id, None)
             try:
