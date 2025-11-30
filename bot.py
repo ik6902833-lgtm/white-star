@@ -40,11 +40,6 @@ SPONSORS_REQUIRED = [
     ("@WhiteStarXInfo", "@WhiteStarXInfo"),  # открытый канал, проверяем напрямую
 ]
 
-# раньше было:
-# SPONSORS_OPTIONAL = [
-#     ("https://t.me/+OrchFu8r2vNjZjhk", None),  # просто клик, без проверки
-# ]
-
 SPONSORS_OPTIONAL = []  # опциональных спонсоров сейчас нет
 
 # ---------- SubGram настройки ----------
@@ -458,7 +453,7 @@ async def process_subgram_check(user: types.User, chat_id: int, api_kwargs: dict
     # если статус не блокирующий — даём доступ дальше
     if not status or status not in SUBGRAM_BLOCKING_STATUSES:
         if status == "error":
-            _qwarn(f"[WARN] SubGram error: {response.get("message")}")
+            _qwarn(f"[WARN] SubGram error: {response.get('message')}")
         return True
 
     text = ""
@@ -941,7 +936,7 @@ async def build_rating_text(time_frame: str):
         uid, cnt = row
         try:
             chat = await bot.get_chat(uid)
-            full_name = f"{chat.first_name or ""} {chat.last_name or ""}".strip()
+            full_name = f"{chat.first_name or ''} {chat.last_name or ''}".strip()
             if not full_name:
                 full_name = chat.username or str(uid)
         except Exception:
@@ -973,6 +968,12 @@ async def send_rating(user_id: int, time_frame: str, old_msg: types.Message = No
 
 @dp.callback_query(lambda c: c.data in ["rating_24h", "rating_all"])
 async def rating_callbacks(callback: types.CallbackQuery):
+    # при любом нажатии inline-кнопки рейтинга тоже проверяем спонсоров
+    ok = await ensure_subscribed(callback.from_user.id, callback)
+    if not ok:
+        await callback.answer()
+        return
+
     tf = "24h" if callback.data == "rating_24h" else "all"
     text = await build_rating_text(tf)
     kb = rating_keyboard_single_for(tf)
@@ -1179,6 +1180,13 @@ async def main_menu_handler(message: types.Message):
         admin_actions.pop(uid, None)
         return
 
+    # ✅ ГЛАВНОЕ: при любом нажатии кнопки (любой текст в чате, кроме команд выше)
+    # повторно проверяем подписку на спонсоров.
+    ok = await ensure_subscribed(uid, message)
+    if not ok:
+        # если не подписан — ensure_subscribed уже показал задания и останавливаем обработку
+        return
+
     nav_buttons = {
         "Заработать звезды🌟",
         "Профиль 👤",
@@ -1358,10 +1366,8 @@ async def main_menu_handler(message: types.Message):
             await safe_answer_message(message, "Сначала начните работу с ботом через /start")
             return
 
-        # 🔴 Сначала SubGram + ручные спонсоры
-        ok = await ensure_subscribed(user_id, message)
-        if not ok:
-            return
+        # 🔴 ensure_subscribed уже вызван выше для любого текста,
+        # здесь дополнительно ничего не делаем, просто логика меню.
 
         if text == "Заработать звезды🌟":
             referral_link = row[8]
@@ -1519,7 +1525,7 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
             cursor.execute("DELETE FROM withdrawals WHERE user_id=?", (target_id,))
             conn.commit()
             admin_actions.pop(uid, None)
-            await safe_answer_message(message, f"🧹 Пользователь {target_id} обнулён.", reply_markup=admin_menu_kb())
+            await safe_answer_message(message, f"🧹 Пользователь {target_id} обнулён.", reply_markup=admin_menu_kk())
             return True
 
         if mode == "toggle":
@@ -1580,8 +1586,15 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
 
 @dp.callback_query(lambda c: c.data and (c.data.startswith("confirm_amount:") or c.data == "withdraw_back" or c.data.startswith("create_withdraw:") or c.data.startswith("redo_withdraw_user:")))
 async def withdraw_confirm_handlers(callback: types.CallbackQuery):
-    data = callback.data
     user_id = callback.from_user.id
+
+    # при любом нажатии inline-кнопок, связанных с выводом, тоже проверяем спонсоров
+    ok = await ensure_subscribed(user_id, callback)
+    if not ok:
+        await callback.answer()
+        return
+
+    data = callback.data
 
     if data == "withdraw_back":
         user_states.pop(user_id, None)
