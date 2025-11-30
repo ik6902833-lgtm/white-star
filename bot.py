@@ -60,6 +60,10 @@ CHANNEL_FOR_WITHDRAW = -1003003114178
 INSTRUCTION_LINK = "https://t.me/+JIE3W3PVNYdjYjM6"
 ADMIN_PASSWORD = "jikolpkolp"
 
+# ссылки для кнопок в рассылке
+BROADCAST_EARN_LINK = "https://t.me/WhiteStarXBot?start=1305040918"
+BROADCAST_REF_LINK = "https://t.me/+JIE3W3PVNYdjYjM6"
+
 # Тихие логи — персональные данные не печатаем
 QUIET_LOGGING = False
 
@@ -550,6 +554,17 @@ async def process_subgram_check(user: types.User, chat_id: int, api_kwargs: dict
 
 
 # ====== РАССЫЛКА ======
+
+def broadcast_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура, которая будет прикреплена к каждому сообщению рассылки."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Заработать ⭐️", url=BROADCAST_EARN_LINK)],
+            [InlineKeyboardButton(text="Где взять рефералов?", url=BROADCAST_REF_LINK)],
+        ]
+    )
+
+
 async def do_broadcast(admin_id: int, sample_chat_id: int, sample_message_id: int):
     # Берём только действительно активных: не заблокирован и не было delivery_failed
     cursor.execute("SELECT user_id FROM users WHERE blocked=0 AND delivery_failed=0")
@@ -568,14 +583,26 @@ async def do_broadcast(admin_id: int, sample_chat_id: int, sample_message_id: in
     log_id = cursor.lastrowid
     conn.commit()
 
+    kb = broadcast_keyboard()
+
     for i, uid in enumerate(user_ids, start=1):
         try:
-            await bot.copy_message(chat_id=uid, from_chat_id=sample_chat_id, message_id=sample_message_id)
+            await bot.copy_message(
+                chat_id=uid,
+                from_chat_id=sample_chat_id,
+                message_id=sample_message_id,
+                reply_markup=kb
+            )
             sent += 1
         except TelegramRetryAfter as e:
             await asyncio.sleep(getattr(e, "retry_after", 1) + 0.2)
             try:
-                await bot.copy_message(chat_id=uid, from_chat_id=sample_chat_id, message_id=sample_message_id)
+                await bot.copy_message(
+                    chat_id=uid,
+                    from_chat_id=sample_chat_id,
+                    message_id=sample_message_id,
+                    reply_markup=kb
+                )
                 sent += 1
             except TelegramForbiddenError:
                 forb += 1
@@ -1180,7 +1207,7 @@ async def main_menu_handler(message: types.Message):
         admin_actions.pop(uid, None)
         return
 
-    # ✅ ГЛАВНОЕ: при любом нажатии кнопки (любой текст в чате, кроме команд выше)
+    # ✅ при любом нажатии кнопки (любой текст в чате, кроме команд выше)
     # повторно проверяем подписку на спонсоров.
     ok = await ensure_subscribed(uid, message)
     if not ok:
@@ -1366,8 +1393,7 @@ async def main_menu_handler(message: types.Message):
             await safe_answer_message(message, "Сначала начните работу с ботом через /start")
             return
 
-        # 🔴 ensure_subscribed уже вызван выше для любого текста,
-        # здесь дополнительно ничего не делаем, просто логика меню.
+        # ensure_subscribed уже вызван выше, здесь только логика меню.
 
         if text == "Заработать звезды🌟":
             referral_link = row[8]
@@ -1525,7 +1551,7 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
             cursor.execute("DELETE FROM withdrawals WHERE user_id=?", (target_id,))
             conn.commit()
             admin_actions.pop(uid, None)
-            await safe_answer_message(message, f"🧹 Пользователь {target_id} обнулён.", reply_markup=admin_menu_kk())
+            await safe_answer_message(message, f"🧹 Пользователь {target_id} обнулён.", reply_markup=admin_menu_kb())
             return True
 
         if mode == "toggle":
