@@ -601,8 +601,8 @@ def broadcast_keyboard() -> InlineKeyboardMarkup:
 
 
 async def do_broadcast(admin_id: int, sample_chat_id: int, sample_message_id: int):
-    # Берём только действительно активных: не заблокирован и не было delivery_failed
-    cursor.execute("SELECT user_id FROM users WHERE blocked=0 AND delivery_failed=0")
+    # Берём всех пользователей, которые когда-либо нажимали /start, но НЕ заблокированы админом
+    cursor.execute("SELECT user_id FROM users WHERE blocked=0")
     rows = cursor.fetchall()
     user_ids = [r[0] for r in rows if r and r[0]]
 
