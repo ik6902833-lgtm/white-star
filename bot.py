@@ -18,7 +18,7 @@ from aiogram.types import (
 )
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter, TelegramBadRequest
 
-API_TOKEN = "8362669039:AAEWLqgAD01xRUMkU4_Hн341j2BrqnaM_TI"
+API_TOKEN = "8362669039:AAEWLqgAD01xRUMkU4_Hn341j2BrqnaM_TI"
 DB_PATH = "/data/users.db"
 
 # (значение оставлено как просили; нормализация выполняется в notify_admin_channel)
@@ -584,7 +584,7 @@ async def process_subgram_check(user: types.User, chat_id: int, api_kwargs: dict
         await bot.send_message(chat_id, text, reply_markup=kb)
         return False
 
-    # ----- Всё остальное (ok, finished, пустой статус и т.п.) — не блокируем -----
+    # ----- Всё остальное (ок, finished, пустой статус и т.п.) — не блокируем -----
     return True
 
 
@@ -601,8 +601,8 @@ def broadcast_keyboard() -> InlineKeyboardMarkup:
 
 
 async def do_broadcast(admin_id: int, sample_chat_id: int, sample_message_id: int):
-    # Берём всех незаблокированных пользователей
-    cursor.execute("SELECT user_id FROM users WHERE blocked=0")
+    # Берём только действительно активных: не заблокирован и не было delivery_failed
+    cursor.execute("SELECT user_id FROM users WHERE blocked=0 AND delivery_failed=0")
     rows = cursor.fetchall()
     user_ids = [r[0] for r in rows if r and r[0]]
 
@@ -642,8 +642,8 @@ async def do_broadcast(admin_id: int, sample_chat_id: int, sample_message_id: in
             except TelegramForbiddenError:
                 forb += 1
                 try:
-                    # помечаем как заблокированного (пользователь заблокировал бота)
-                    cursor.execute("UPDATE users SET blocked=1 WHERE user_id=?", (uid,))
+                    # помечаем как delivery_failed, но не трогаем manual blocked
+                    cursor.execute("UPDATE users SET delivery_failed=1 WHERE user_id=?", (uid,))
                     conn.commit()
                 except Exception:
                     pass
@@ -652,7 +652,7 @@ async def do_broadcast(admin_id: int, sample_chat_id: int, sample_message_id: in
         except TelegramForbiddenError:
             forb += 1
             try:
-                cursor.execute("UPDATE users SET blocked=1 WHERE user_id=?", (uid,))
+                cursor.execute("UPDATE users SET delivery_failed=1 WHERE user_id=?", (uid,))
                 conn.commit()
             except Exception:
                 pass
@@ -671,12 +671,12 @@ async def do_broadcast(admin_id: int, sample_chat_id: int, sample_message_id: in
     """, (now_kyiv().isoformat(), sent, forb, failed, log_id))
     conn.commit()
 
-    # Общая стата по базе: учитываем только blocked
+    # Общая стата по базе: учитываем и blocked, и delivery_failed
     cursor.execute("SELECT COUNT(*) FROM users")
     total_users_row = cursor.fetchone()
     total_users = total_users_row[0] if total_users_row and total_users_row[0] is not None else 0
 
-    cursor.execute("SELECT COUNT(*) FROM users WHERE blocked=1")
+    cursor.execute("SELECT COUNT(*) FROM users WHERE blocked=1 OR delivery_failed=1")
     blocked_users_row = cursor.fetchone()
     blocked_users = blocked_users_row[0] if blocked_users_row and blocked_users_row[0] is not None else 0
 
@@ -1275,8 +1275,8 @@ async def main_menu_handler(message: types.Message):
         total_row = cursor.fetchone()
         total = total_row[0] if total_row and total_row[0] is not None else 0
 
-        # считаем заблоченных только по полю blocked
-        cursor.execute("SELECT COUNT(*) FROM users WHERE blocked=1")
+        # считаем заблоченных админом И тех, у кого рассылка падала (delivery_failed)
+        cursor.execute("SELECT COUNT(*) FROM users WHERE blocked=1 OR delivery_failed=1")
         blocked_row = cursor.fetchone()
         blocked = blocked_row[0] if blocked_row and blocked_row[0] is not None else 0
 
