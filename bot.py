@@ -429,16 +429,25 @@ async def subgram_get_sponsors(user: types.User, chat_id: int, extra: dict | Non
             return None
 
 
+# >>>>>>>>>>>>>>> НОВАЯ ВЕРСИЯ process_subgram_check (фикс петли) <<<<<<<<<<<<<<<<
+
 async def process_subgram_check(user: types.User, chat_id: int, api_kwargs: dict | None = None) -> bool:
     """
     Основная логика обработки статусов SubGram.
     Возвращает:
       True  — можно дать доступ дальше (идём в меню),
       False — нужно остановиться, т.к. отправили задания/опрос/регистрацию.
+
+    ВАЖНО: при status == "warning" мы теперь проверяем:
+      - есть ли вообще хоть один незакрытый спонсор у SubGram;
+      - есть ли твои ручные обязательные спонсоры, на которые пользователь не подписан.
+    Если НИ ОДНОЙ задачи нет — НЕ блокируем, возвращаем True.
     """
+
     if api_kwargs is None:
         api_kwargs = {}
 
+    # Базовые данные о пользователе для SubGram
     user_data = {
         "first_name": user.first_name,
         "username": user.username,
@@ -452,46 +461,56 @@ async def process_subgram_check(user: types.User, chat_id: int, api_kwargs: dict
         # если API не ответил — не режем пользователя (дальше проверим только твоих спонсоров)
         return True
 
-    status = response.get("status")
+    status = str(response.get("status") or "").strip()
 
-    # если статус не блокирующий — даём доступ дальше
-    if not status or status not in SUBGRAM_BLOCKING_STATUSES:
-        if status == "error":
-            _qwarn(f"[WARN] SubGram error: {response.get('message')}")
+    # Ошибки SubGram не должны ломать доступ
+    if status == "error":
+        _qwarn(f"[WARN] SubGram error: {response.get('message')}")
         return True
 
-    text = ""
-    rows: list[list[InlineKeyboardButton]] = []
-
+    # ----- 1) Статус warning: нужно подписаться на спонсоров -----
     if status == "warning":
-        # Здесь используем ТВОЙ шаблон: "Канал 1#", "Канал 2#" и кнопку "✅Проверить подписку"
         text = "Уважаемый пользователь, к сожалению, вы не подписаны на спонсоров😢, попробуйте снова:"
 
-        sponsors = response.get("additional", {}).get("sponsors", [])
-        all_links = []
+        # --- SubGram спонсоры ---
+        sponsors = response.get("additional", {}).get("sponsors", []) or []
+        subgram_unsub_links: list[str] = []
 
-        # ссылки от SubGram
         for sponsor in sponsors:
             try:
-                if sponsor.get("available_now") and sponsor.get("status") == "unsubscribed":
-                    link = sponsor.get("link")
-                    if not link:
-                        continue
-                    url = make_tg_url(link)
-                    if url:
-                        all_links.append(url)
+                if not sponsor.get("available_now"):
+                    continue
+                if sponsor.get("status") != "unsubscribed":
+                    continue
+                link = sponsor.get("link")
+                if not link:
+                    continue
+                url = make_tg_url(link)
+                if url:
+                    subgram_unsub_links.append(url)
             except Exception:
                 continue
 
-        # добавляем ТВОИХ спонсоров (обязательные, на которые не подписан, и все опциональные)
+        # --- Твои ручные спонсоры ---
         manual_required, manual_optional = await gather_manual_sponsors(user.id)
+
+        # Если нет ни одного незакрытого спонсора ни у SubGram, ни у тебя —
+        # считаем, что пользователь ВСЁ сделал, и не блокируем.
+        if not subgram_unsub_links and not manual_required:
+            return True
+
+        # Собираем все ссылки, которые нужно показать
+        all_links: list[str] = []
+        all_links.extend(subgram_unsub_links)
         all_links.extend(manual_required)
         all_links.extend(manual_optional)
 
-        # собираем кнопки
-        idx = 1
-        temp_row = []
+        # Строим клавиатуру без дублей
+        rows: list[list[InlineKeyboardButton]] = []
         seen = set()
+        temp_row: list[InlineKeyboardButton] = []
+        idx = 1
+
         for url in all_links:
             if not url or url in seen:
                 continue
@@ -505,18 +524,26 @@ async def process_subgram_check(user: types.User, chat_id: int, api_kwargs: dict
         if temp_row:
             rows.append(temp_row)
 
-        # кнопка проверки
+        # кнопка "проверить подписку" (как и было)
         rows.append([InlineKeyboardButton(text="✅Проверить подписку", callback_data="subgram-op")])
 
-    elif status == "gender":
-        # Пол спрашиваем только по требованию SubGram (это их логика), свою старую выборку пола мы убрали.
+        kb = InlineKeyboardMarkup(inline_keyboard=rows)
+        await bot.send_message(chat_id, text, reply_markup=kb)
+        return False
+
+    # ----- 2) Статус gender: спрашиваем пол -----
+    if status == "gender":
         text = "Укажите ваш пол:"
-        rows.append([
+        rows = [[
             InlineKeyboardButton(text="Мужской", callback_data="subgram_gender_male"),
             InlineKeyboardButton(text="Женский", callback_data="subgram_gender_female"),
-        ])
+        ]]
+        kb = InlineKeyboardMarkup(inline_keyboard=rows)
+        await bot.send_message(chat_id, text, reply_markup=kb)
+        return False
 
-    elif status == "age":
+    # ----- 3) Статус age: спрашиваем возраст -----
+    if status == "age":
         text = "Укажите ваш возраст:"
         age_categories = {
             "c1": "Младше 10",
@@ -526,7 +553,8 @@ async def process_subgram_check(user: types.User, chat_id: int, api_kwargs: dict
             "c5": "18-24",
             "c6": "25 и старше",
         }
-        tmp = []
+        rows: list[list[InlineKeyboardButton]] = []
+        tmp: list[InlineKeyboardButton] = []
         for code, label in age_categories.items():
             tmp.append(InlineKeyboardButton(text=label, callback_data=f"subgram_age_{code}"))
             if len(tmp) == 2:
@@ -535,21 +563,28 @@ async def process_subgram_check(user: types.User, chat_id: int, api_kwargs: dict
         if tmp:
             rows.append(tmp)
 
-    elif status == "register":
-        text = "Для продолжения, пожалуйста, пройдите быструю регистрацию."
-        reg_url = response.get("additional", {}).get("registration_url")
-        if reg_url:
-            rows.append([InlineKeyboardButton(text="✅ Пройти регистрацию", web_app=types.WebAppInfo(url=reg_url))])
-            rows.append([InlineKeyboardButton(text="Продолжить", callback_data="subgram-op")])
-        else:
-            # если нет ссылки — не блокируем
-            return True
-
-    if rows:
         kb = InlineKeyboardMarkup(inline_keyboard=rows)
         await bot.send_message(chat_id, text, reply_markup=kb)
         return False
 
+    # ----- 4) Статус register: регистрация на стороне SubGram -----
+    if status == "register":
+        text = "Для продолжения, пожалуйста, пройдите быструю регистрацию."
+        reg_url = response.get("additional", {}).get("registration_url")
+        if not reg_url:
+            # если SubGram не дал ссылку, не блокируем
+            return True
+
+        rows = [
+            [InlineKeyboardButton(text="✅ Пройти регистрацию",
+                                  web_app=types.WebAppInfo(url=reg_url))],
+            [InlineKeyboardButton(text="Продолжить", callback_data="subgram-op")],
+        ]
+        kb = InlineKeyboardMarkup(inline_keyboard=rows)
+        await bot.send_message(chat_id, text, reply_markup=kb)
+        return False
+
+    # ----- Всё остальное (ok, finished, пустой статус и т.п.) — не блокируем -----
     return True
 
 
@@ -1534,7 +1569,7 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
         await safe_answer_message(
             message,
             f"✅ Новая награда за реферала установлена: {new_reward}⭐️",
-            reply_markup=admin_menu_kb()
+            reply_markup=admin_menu_kк()
         )
         return True
 
