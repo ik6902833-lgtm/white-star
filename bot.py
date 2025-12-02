@@ -18,7 +18,7 @@ from aiogram.types import (
 )
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter, TelegramBadRequest
 
-API_TOKEN = "8362669039:AAEWLqgAD01xRUMkU4_Hn341j2BrqnaM_TI"
+API_TOKEN = "8362669039:AAEWLqgAD01xRUMkU4_Hн341j2BrqnaM_TI"
 DB_PATH = "/data/users.db"
 
 # (значение оставлено как просили; нормализация выполняется в notify_admin_channel)
@@ -139,7 +139,6 @@ try:
     cursor.execute("ALTER TABLE users ADD COLUMN delivery_failed INTEGER DEFAULT 0")
     conn.commit()
 except Exception:
-    # колонка уже есть или старая sqlite не даёт — пропускаем
     pass
 
 # Подгружаем REFERRAL_REWARD из базы (если есть), иначе записываем туда дефолт
@@ -158,7 +157,6 @@ try:
         )
         conn.commit()
 except Exception:
-    # Если что-то сломалось, просто идём с дефолтным значением 4
     pass
 
 user_states = {}
@@ -174,7 +172,6 @@ _stats_cache_date = None
 _stats_cache_users = BASE_USERS
 _stats_cache_withdrawn = BASE_WITHDRAWN
 
-# уменьшаем таймаут запросов к Telegram до 5 секунд
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
@@ -186,9 +183,6 @@ def _qwarn(msg: str):
 
 
 def set_referral_reward(new_value: int):
-    """
-    Обновляет глобальную награду за реферала и сохраняет её в базе.
-    """
     global REFERRAL_REWARD
     REFERRAL_REWARD = new_value
     try:
@@ -269,9 +263,6 @@ def normalize_chat_target(target):
 
 
 def make_tg_url(link):
-    """
-    Приводим ссылку/юзернейм к кликабельному URL.
-    """
     if not link:
         return None
     s = str(link)
@@ -313,19 +304,9 @@ async def resolve_username_display(user_id: int) -> str:
 # ====== Ручные спонсоры (помимо SubGram) ======
 
 async def gather_manual_sponsors(user_id: int):
-    """
-    Возвращает:
-      required_missing: ссылки на обязательные каналы, на которые пользователь НЕ подписан
-      optional_links: все дополнительные (опциональные) ссылки
-
-    ВАЖНО: если бот не может проверить подписку (TelegramBadRequest — нет прав,
-    бот не админ и т.п.), мы НЕ добавляем канал в required_missing и не
-    зацикливаем пользователя на «вы не подписаны».
-    """
     required_missing = []
     optional_links = []
 
-    # обязательные
     for open_link, check_target in SPONSORS_REQUIRED:
         url = make_tg_url(open_link or check_target)
         chat_to_check = normalize_chat_target(check_target or open_link)
@@ -339,21 +320,17 @@ async def gather_manual_sponsors(user_id: int):
                     ChatMemberStatus.ADMINISTRATOR,
                     ChatMemberStatus.CREATOR,
                 ):
-                    # пользователь реально не подписан
                     need_button = True
             except TelegramBadRequest as e:
-                # бот не может проверить подписку → НЕ блокируем
                 _qwarn(f"[WARN] get_chat_member failed for {chat_to_check}: {e}")
                 need_button = False
             except Exception as e:
-                # любая другая ошибка — считаем, что подписки нет (подстраховка)
                 _qwarn(f"[WARN] get_chat_member unexpected error for {chat_to_check}: {type(e).__name__}")
                 need_button = True
 
         if need_button and url:
             required_missing.append(url)
 
-    # опциональные
     for open_link, _ in SPONSORS_OPTIONAL:
         url = make_tg_url(open_link)
         if url:
@@ -363,18 +340,10 @@ async def gather_manual_sponsors(user_id: int):
 
 
 async def process_manual_sponsors(user: types.User, chat_id: int) -> bool:
-    """
-    Проверка ТВОИХ спонсоров (из списков выше).
-
-    True  — всё ок, можно пускать дальше.
-    False — показали сообщение с каналами, ждём пока подпишется.
-    """
     required_missing, optional_links = await gather_manual_sponsors(user.id)
     if not required_missing:
-        # все обязательные каналы уже подписаны (или бот не может проверить)
         return True
 
-    # собираем все ссылки, которые нужно показать
     all_links = required_missing + optional_links
     idx = 1
     rows = []
@@ -394,7 +363,6 @@ async def process_manual_sponsors(user: types.User, chat_id: int) -> bool:
     if temp_row:
         rows.append(temp_row)
 
-    # одна кнопка на проверку (та же, что и у SubGram — общий стиль)
     rows.append([InlineKeyboardButton(text="✅Проверить подписку", callback_data="subgram-op")])
 
     kb = InlineKeyboardMarkup(inline_keyboard=rows)
@@ -406,10 +374,6 @@ async def process_manual_sponsors(user: types.User, chat_id: int) -> bool:
 # ====== SubGram: /get-sponsors ======
 
 async def subgram_get_sponsors(user: types.User, chat_id: int, extra: dict | None = None) -> dict | None:
-    """
-    Универсальная функция запроса к SubGram /get-sponsors.
-    Возвращает dict (ответ JSON) или None при ошибке.
-    """
     headers = {"Auth": SUBGRAM_API_KEY}
     payload = {
         "user_id": user.id,
@@ -429,25 +393,10 @@ async def subgram_get_sponsors(user: types.User, chat_id: int, extra: dict | Non
             return None
 
 
-# >>>>>>>>>>>>>>> НОВАЯ ВЕРСИЯ process_subgram_check (фикс петли) <<<<<<<<<<<<<<<<
-
 async def process_subgram_check(user: types.User, chat_id: int, api_kwargs: dict | None = None) -> bool:
-    """
-    Основная логика обработки статусов SubGram.
-    Возвращает:
-      True  — можно дать доступ дальше (идём в меню),
-      False — нужно остановиться, т.к. отправили задания/опрос/регистрацию.
-
-    ВАЖНО: при status == "warning" мы теперь проверяем:
-      - есть ли вообще хоть один незакрытый спонсор у SubGram;
-      - есть ли твои ручные обязательные спонсоры, на которые пользователь не подписан.
-    Если НИ ОДНОЙ задачи нет — НЕ блокируем, возвращаем True.
-    """
-
     if api_kwargs is None:
         api_kwargs = {}
 
-    # Базовые данные о пользователе для SubGram
     user_data = {
         "first_name": user.first_name,
         "username": user.username,
@@ -458,21 +407,17 @@ async def process_subgram_check(user: types.User, chat_id: int, api_kwargs: dict
 
     response = await subgram_get_sponsors(user, chat_id, user_data)
     if not response:
-        # если API не ответил — не режем пользователя (дальше проверим только твоих спонсоров)
         return True
 
     status = str(response.get("status") or "").strip()
 
-    # Ошибки SubGram не должны ломать доступ
     if status == "error":
         _qwarn(f"[WARN] SubGram error: {response.get('message')}")
         return True
 
-    # ----- 1) Статус warning: нужно подписаться на спонсоров -----
     if status == "warning":
         text = "Уважаемый пользователь, к сожалению, вы не подписаны на спонсоров😢, попробуйте снова:"
 
-        # --- SubGram спонсоры ---
         sponsors = response.get("additional", {}).get("sponsors", []) or []
         subgram_unsub_links: list[str] = []
 
@@ -491,21 +436,16 @@ async def process_subgram_check(user: types.User, chat_id: int, api_kwargs: dict
             except Exception:
                 continue
 
-        # --- Твои ручные спонсоры ---
         manual_required, manual_optional = await gather_manual_sponsors(user.id)
 
-        # Если нет ни одного незакрытого спонсора ни у SubGram, ни у тебя —
-        # считаем, что пользователь ВСЁ сделал, и не блокируем.
         if not subgram_unsub_links and not manual_required:
             return True
 
-        # Собираем все ссылки, которые нужно показать
         all_links: list[str] = []
         all_links.extend(subgram_unsub_links)
         all_links.extend(manual_required)
         all_links.extend(manual_optional)
 
-        # Строим клавиатуру без дублей
         rows: list[list[InlineKeyboardButton]] = []
         seen = set()
         temp_row: list[InlineKeyboardButton] = []
@@ -524,14 +464,12 @@ async def process_subgram_check(user: types.User, chat_id: int, api_kwargs: dict
         if temp_row:
             rows.append(temp_row)
 
-        # кнопка "проверить подписку" (как и было)
         rows.append([InlineKeyboardButton(text="✅Проверить подписку", callback_data="subgram-op")])
 
         kb = InlineKeyboardMarkup(inline_keyboard=rows)
         await bot.send_message(chat_id, text, reply_markup=kb)
         return False
 
-    # ----- 2) Статус gender: спрашиваем пол -----
     if status == "gender":
         text = "Укажите ваш пол:"
         rows = [[
@@ -542,7 +480,6 @@ async def process_subgram_check(user: types.User, chat_id: int, api_kwargs: dict
         await bot.send_message(chat_id, text, reply_markup=kb)
         return False
 
-    # ----- 3) Статус age: спрашиваем возраст -----
     if status == "age":
         text = "Укажите ваш возраст:"
         age_categories = {
@@ -567,12 +504,10 @@ async def process_subgram_check(user: types.User, chat_id: int, api_kwargs: dict
         await bot.send_message(chat_id, text, reply_markup=kb)
         return False
 
-    # ----- 4) Статус register: регистрация на стороне SubGram -----
     if status == "register":
         text = "Для продолжения, пожалуйста, пройдите быструю регистрацию."
         reg_url = response.get("additional", {}).get("registration_url")
         if not reg_url:
-            # если SubGram не дал ссылку, не блокируем
             return True
 
         rows = [
@@ -584,14 +519,12 @@ async def process_subgram_check(user: types.User, chat_id: int, api_kwargs: dict
         await bot.send_message(chat_id, text, reply_markup=kb)
         return False
 
-    # ----- Всё остальное (ок, finished, пустой статус и т.п.) — не блокируем -----
     return True
 
 
 # ====== РАССЫЛКА ======
 
 def broadcast_keyboard() -> InlineKeyboardMarkup:
-    """Клавиатура, которая будет прикреплена к каждому сообщению рассылки."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Заработать ⭐️", url=BROADCAST_EARN_LINK)],
@@ -601,7 +534,6 @@ def broadcast_keyboard() -> InlineKeyboardMarkup:
 
 
 async def do_broadcast(admin_id: int, sample_chat_id: int, sample_message_id: int):
-    # Берём всех пользователей, которые когда-либо нажимали /start, но НЕ заблокированы админом
     cursor.execute("SELECT user_id FROM users WHERE blocked=0")
     rows = cursor.fetchall()
     user_ids = [r[0] for r in rows if r and r[0]]
@@ -642,7 +574,6 @@ async def do_broadcast(admin_id: int, sample_chat_id: int, sample_message_id: in
             except TelegramForbiddenError:
                 forb += 1
                 try:
-                    # помечаем как delivery_failed, но не трогаем manual blocked
                     cursor.execute("UPDATE users SET delivery_failed=1 WHERE user_id=?", (uid,))
                     conn.commit()
                 except Exception:
@@ -671,7 +602,6 @@ async def do_broadcast(admin_id: int, sample_chat_id: int, sample_message_id: in
     """, (now_kyiv().isoformat(), sent, forb, failed, log_id))
     conn.commit()
 
-    # Общая стата по базе: учитываем и blocked, и delivery_failed
     cursor.execute("SELECT COUNT(*) FROM users")
     total_users_row = cursor.fetchone()
     total_users = total_users_row[0] if total_users_row and total_users_row[0] is not None else 0
@@ -925,42 +855,21 @@ async def start_handler(message: types.Message):
             (user_id, username, 0, 1, 0, 0, 0, referrer_id, referral_link, join_date, 0)
         )
         conn.commit()
-
-        # уведомление о новом входе (как раньше, если без реферала)
-        if referrer_id == 0:
-            try:
-                joined_disp = await resolve_username_display(user_id)
-                admin_text = (
-                    "🆕 <b>Новый вход</b>\n"
-                    f"👤 Вошёл: {joined_disp} (ID: <code>{user_id}</code>)\n"
-                    f"🤝 Пригласил: @— (ID: <code>—</code>)\n"
-                    f"🕒 {join_date}"
-                )
-                await notify_admin_channel(admin_text)
-            except Exception:
-                pass
     else:
         referral_link = row[8] if row and row[8] else f"https://t.me/{bot_username}?start={user_id}"
         cursor.execute("UPDATE users SET username=?, referral_link=? WHERE user_id=?", (username, referral_link, user_id))
         conn.commit()
 
-    # На /start сначала проверяем SubGram + твоих спонсоров
     ok = await ensure_subscribed(user_id, message)
     if not ok:
-        # SubGram и/или ручные спонсоры уже показали задания — ждём действий пользователя
         return
 
-    # Если уже подписан и всё ок — просто показать меню
     await safe_answer_message(message, "🔝 Главное меню", reply_markup=main_menu_keyboard())
 
 
 # ---------------------- Рейтинг / инфо / выводы и т.д. ----------------------
 
 async def build_rating_text(time_frame: str):
-    """
-    Строим текст рейтинга, используя ИМЯ ПРОФИЛЯ (first_name + last_name),
-    а не @username.
-    """
     cur = conn.cursor()
 
     if time_frame == "24h":
@@ -1030,7 +939,6 @@ async def send_rating(user_id: int, time_frame: str, old_msg: types.Message = No
 
 @dp.callback_query(lambda c: c.data in ["rating_24h", "rating_all"])
 async def rating_callbacks(callback: types.CallbackQuery):
-    # при любом нажатии inline-кнопки рейтинга тоже проверяем спонсоров
     ok = await ensure_subscribed(callback.from_user.id, callback)
     if not ok:
         await callback.answer()
@@ -1052,12 +960,6 @@ async def rating_callbacks(callback: types.CallbackQuery):
 # ---------- Общий хелпер: SubGram + рефералка + ручные спонсоры ----------
 
 async def ensure_subscribed(user_id: int, carrier, skip_subgram: bool = False) -> bool:
-    """
-    Быстрая проверка доступа:
-    1) SubGram (если не skip_subgram).
-    2) Проверка ТВОИХ ручных спонсоров.
-    3) Если всё ок — отмечаем в БД, один раз выдаём приветствие и реф-награду.
-    """
     user: types.User | None = None
     chat_id: int | None = None
 
@@ -1068,23 +970,19 @@ async def ensure_subscribed(user_id: int, carrier, skip_subgram: bool = False) -
         user = carrier.from_user
         chat_id = carrier.message.chat.id
 
-    # Шаг 1. SubGram
     if not skip_subgram and user and chat_id:
         ok_sub = await process_subgram_check(user, chat_id)
         if not ok_sub:
             return False
 
-    # Шаг 1.5. Ручные спонсоры
     if user and chat_id:
         ok_manual = await process_manual_sponsors(user, chat_id)
         if not ok_manual:
             return False
 
-    # Шаг 2. Отметить подписку и, если первый раз, выдать приветствие + рефералку
     cursor.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
     row_user = cursor.fetchone()
     if not row_user:
-        # на всякий случай, если кто-то написал, не пройдя /start
         return True
 
     subscribed_flag = row_user[2] or 0
@@ -1092,11 +990,9 @@ async def ensure_subscribed(user_id: int, carrier, skip_subgram: bool = False) -
     referrer_id = row_user[7]
 
     if not subscribed_flag:
-        # Обновляем флаг
         cursor.execute("UPDATE users SET subscribed=1, first_time=0 WHERE user_id=?", (user_id,))
         conn.commit()
 
-        # Приветствие
         await safe_send_message(user_id, "⭐️")
         await safe_send_message(
             user_id,
@@ -1113,10 +1009,27 @@ async def ensure_subscribed(user_id: int, carrier, skip_subgram: bool = False) -
             parse_mode="HTML"
         )
 
-        # Реферальная логика (1 раз)
+        # ⬇️ УВЕДОМЛЕНИЕ О НОВОМ ПОЛЬЗОВАТЕЛЕ ТЕПЕРЬ ТОЛЬКО ПОСЛЕ ПОДПИСКИ НА ВСЕХ СПОНСОРОВ
+        joined_disp = await resolve_username_display(user_id)
+        if referrer_id and referrer_id != user_id:
+            inviter_disp = await resolve_username_display(referrer_id)
+            inviter_id_text = f"<code>{referrer_id}</code>"
+        else:
+            inviter_disp = "@—"
+            inviter_id_text = "<code>—</code>"
+
+        admin_text_new = (
+            "🆕 <b>Новый вход</b>\n"
+            f"👤 Вошёл: {joined_disp} (ID: <code>{user_id}</code>)\n"
+            f"🤝 Пригласил: {inviter_disp} (ID: {inviter_id_text})\n"
+            f"🕒 {now_kyiv().isoformat()}"
+        )
+        await notify_admin_channel(admin_text_new)
+
+        # Реферальная логика (1 раз, тоже после подписки)
         if referrer_id and referrer_id != user_id:
             ref_disp = await resolve_username_display(referrer_id)
-            joined_disp = await resolve_username_display(user_id)
+            joined_disp_for_ref = joined_disp
 
             cursor.execute(
                 "SELECT rewarded FROM referral_rewards WHERE referrer_id=? AND referred_id=?",
@@ -1165,7 +1078,7 @@ async def ensure_subscribed(user_id: int, carrier, skip_subgram: bool = False) -
                     await notify_admin_channel(
                         "👥 <b>Реф-подтверждение</b>\n"
                         f"🤝 Пригласил: {ref_disp} (ID: <code>{referrer_id}</code>)\n"
-                        f"👤 Вошёл: {joined_disp} (ID: <code>{user_id}</code>)\n"
+                        f"👤 Вошёл: {joined_disp_for_ref} (ID: <code>{user_id}</code>)\n"
                         f"🕒 {now_kyiv().isoformat()}"
                     )
                 else:
@@ -1177,7 +1090,7 @@ async def ensure_subscribed(user_id: int, carrier, skip_subgram: bool = False) -
                     await notify_admin_channel(
                         "👥 <b>Реф-подтверждение</b>\n"
                         f"🤝 Пригласил: {ref_disp} (ID: <code>{referrer_id}</code>)\n"
-                        f"👤 Вошёл: {joined_disp} (ID: <code>{user_id}</code>)\n"
+                        f"👤 Вошёл: {joined_disp_for_ref} (ID: <code>{user_id}</code>)\n"
                         f"🕒 {now_kyiv().isoformat()}"
                     )
 
@@ -1188,12 +1101,6 @@ async def ensure_subscribed(user_id: int, carrier, skip_subgram: bool = False) -
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("subgram"))
 async def subgram_callbacks(callback: types.CallbackQuery):
-    """
-    Обработка callback-ов от SubGram и общей проверки:
-    - subgram-op
-    - subgram_gender_*
-    - subgram_age_*
-    """
     try:
         await callback.message.delete()
     except TelegramBadRequest:
@@ -1208,16 +1115,13 @@ async def subgram_callbacks(callback: types.CallbackQuery):
         api_kwargs["gender"] = data.split("_")[2]
     elif data.startswith("subgram_age_"):
         api_kwargs["age"] = data.split("_")[2]
-    # для subgram-op api_kwargs остаётся пустым
 
     await callback.answer()
 
-    # повторно идём в SubGram с уточнением пола/возраста или проверкой подписки
     ok_sub = await process_subgram_check(callback.from_user, callback.message.chat.id, api_kwargs)
     if not ok_sub:
         return
 
-    # SubGram дал зелёный свет -> проверяем ручных спонсоров и рефку
     ok_our = await ensure_subscribed(callback.from_user.id, callback, skip_subgram=True)
     if ok_our:
         await callback.message.answer("✅ Доступ предоставлен!", reply_markup=main_menu_keyboard())
@@ -1242,11 +1146,8 @@ async def main_menu_handler(message: types.Message):
         admin_actions.pop(uid, None)
         return
 
-    # ✅ при любом нажатии кнопки (любой текст в чате, кроме команд выше)
-    # повторно проверяем подписку на спонсоров.
     ok = await ensure_subscribed(uid, message)
     if not ok:
-        # если не подписан — ensure_subscribed уже показал задания и останавливаем обработку
         return
 
     nav_buttons = {
@@ -1275,7 +1176,6 @@ async def main_menu_handler(message: types.Message):
         total_row = cursor.fetchone()
         total = total_row[0] if total_row and total_row[0] is not None else 0
 
-        # считаем заблоченных админом И тех, у кого рассылка падала (delivery_failed)
         cursor.execute("SELECT COUNT(*) FROM users WHERE blocked=1 OR delivery_failed=1")
         blocked_row = cursor.fetchone()
         blocked = blocked_row[0] if blocked_row and blocked_row[0] is not None else 0
@@ -1356,7 +1256,6 @@ async def main_menu_handler(message: types.Message):
         await safe_answer_message(message, "🔝 Главное меню", reply_markup=main_menu_keyboard())
         return
 
-    # ----- выводы / профиль / инфо -----
     state = user_states.get(user_id)
     if state:
         stage = state.get("stage")
@@ -1427,8 +1326,6 @@ async def main_menu_handler(message: types.Message):
         if not row:
             await safe_answer_message(message, "Сначала начните работу с ботом через /start")
             return
-
-        # ensure_subscribed уже вызван выше, здесь только логика меню.
 
         if text == "Заработать звезды🌟":
             referral_link = row[8]
@@ -1527,7 +1424,6 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
         await safe_answer_message(message, "❎ Отменено.", reply_markup=admin_menu_kb())
         return True
 
-    # ===== Рассылка: sample -> confirm -> отправка
     if mode == "broadcast":
         if step == "sample":
             state["sample_chat_id"] = message.chat.id
@@ -1553,7 +1449,6 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
                 await safe_answer_message(message, "Не понял. Напишите «да» для запуска рассылки или «отмена».", reply_markup=admin_menu_kb())
                 return True
 
-    # ===== Режим изменения награды за реферала
     if mode == "set_ref_reward" and step == "value":
         try:
             new_reward = int((message.text or "").strip())
@@ -1573,7 +1468,6 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
         )
         return True
 
-    # ===== Остальные режимы (reset/toggle/grant)
     if step == "user":
         target_id, target_username = parse_user_ref(message.text or "")
         if not target_id:
@@ -1623,7 +1517,7 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
         target_id = state.get("target_id")
         if not target_id:
             admin_actions.pop(uid, None)
-            await safe_answer_message(message, "⚠️ Ошибка контекста. Начните заново.", reply_markup=admin_menu_kb())
+            await safe_answer_message(message, "⚠️ Ошибка контекста. Начните заново.", reply_markup=admin_menu_kк())
             return True
 
         cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (amount, target_id))
@@ -1649,7 +1543,6 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
 async def withdraw_confirm_handlers(callback: types.CallbackQuery):
     user_id = callback.from_user.id
 
-    # при любом нажатии inline-кнопок, связанных с выводом, тоже проверяем спонсоров
     ok = await ensure_subscribed(user_id, callback)
     if not ok:
         await callback.answer()
