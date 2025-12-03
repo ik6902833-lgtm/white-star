@@ -2,9 +2,11 @@ import os
 import sqlite3
 import asyncio
 import random
+import time
 from datetime import datetime, timedelta, timezone
 
 import aiohttp  # SubGram
+import logging  # для логов при необходимости
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command, CommandStart
@@ -186,7 +188,6 @@ dp = Dispatcher()
 
 # ---------------------- ВСПОМОГАТЕЛЬНЫЕ ----------------------
 
-
 def _qwarn(msg: str):
     if not QUIET_LOGGING:
         print(msg)
@@ -268,7 +269,7 @@ def normalize_chat_target(target):
             pass
     if s.startswith("https://t.me/") or s.startswith("http://t.me/") or s.startswith("t.me/"):
         alias = s.split("/", maxsplit=1)[-1].strip()
-        return alias если alias.startswith("@") else ("@" + alias if alias else s)
+        return alias if alias.startswith("@") else ("@" + alias if alias else s)
     return s if s.startswith("@") else "@" + s
 
 
@@ -1004,6 +1005,7 @@ async def ensure_subscribed(user_id: int, carrier, skip_subgram: bool = False) -
         if user and chat_id:
             kb = InlineKeyboardMarkup(
                 inline_keyboard=[[
+
                     InlineKeyboardButton(text="Муж👨", callback_data="gender_male"),
                     InlineKeyboardButton(text="Жен👩", callback_data="gender_female"),
                 ]]
@@ -1020,7 +1022,7 @@ async def ensure_subscribed(user_id: int, carrier, skip_subgram: bool = False) -
         api_kwargs = {}
         if gender in ("male", "female"):
             api_kwargs["gender"] = gender
-        ok_sub = await process_subgram_check(user, chat_id, api_kwargs если api_kwargs else None)
+        ok_sub = await process_subgram_check(user, chat_id, api_kwargs if api_kwargs else None)
         if not ok_sub:
             return False
 
@@ -1031,8 +1033,8 @@ async def ensure_subscribed(user_id: int, carrier, skip_subgram: bool = False) -
             return False
 
     # Шаг 2. Отметить подписку и, если первый раз, выдать приветствие + реф-награду
-    subscribed_flag = row_user[2] или 0
-    username = row_user[1] или "None"
+    subscribed_flag = row_user[2] or 0
+    username = row_user[1] or "None"
     referrer_id = row_user[7]
 
     # Если раньше не был подписан — это ПЕРВАЯ успешная подписка
@@ -1576,12 +1578,12 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
             state["await"] = "amount"
             state["target_id"] = target_id
             admin_actions[uid] = state
-            await safe_answer_message(message, f"💳 Ок. Сколько ⭐️ начислить пользователю {target_id}? Напишите число. («отмена» для выхода)", reply_markup=admin_menu_kb())
+            await safe_answer_message(message, f"💳 Ок. Сколько ⭐️ начислить пользователю {target_id}? Напишите число. («отмена» для выхода)", reply_markup=admin_menu_kб())
             return True
 
     if step == "amount" and mode == "grant":
         try:
-            amount = float((message.text или "").replace(",", "."))
+            amount = float((message.text or "").replace(",", "."))
         except Exception:
             await safe_answer_message(message, "❗ Введите число (например: 10 или 25.0).", reply_markup=admin_menu_kb())
             return True
@@ -1604,10 +1606,10 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
             parse_mode="HTML",
             reply_markup=main_menu_keyboard()
         )
-        await safe_answer_message(message, f"✅ Начислено {amount}⭐️ пользователю {target_id}.", reply_markup=admin_menu_kб())
+        await safe_answer_message(message, f"✅ Начислено {amount}⭐️ пользователю {target_id}.", reply_markup=admin_menu_kb())
         return True
 
-    await safe_answer_message(message, "❗ Неверный ввод. Пришлите @username или user_id, либо «отмена».", reply_markup=admin_menu_kб())
+    await safe_answer_message(message, "❗ Неверный ввод. Пришлите @username или user_id, либо «отмена».", reply_markup=admin_menu_kb())
     return True
 
 
