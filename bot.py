@@ -83,7 +83,8 @@ CREATE TABLE IF NOT EXISTS users (
     referral_link TEXT,
     created_at TEXT,
     blocked INTEGER DEFAULT 0,
-    delivery_failed INTEGER DEFAULT 0
+    delivery_failed INTEGER DEFAULT 0,
+    gender TEXT
 );
 """)
 
@@ -140,6 +141,17 @@ try:
     conn.commit()
 except Exception:
     # колонка уже есть или старая sqlite не даёт — пропускаем
+    pass
+
+# Новый столбец для пола пользователя
+try:
+    cursor.execute("ALTER TABLE users ADD COLUMN gender TEXT")
+    conn.commit()
+    # Все, кто уже был в базе, помечаем как 'legacy', чтобы им не показывать вопрос про пол
+    cursor.execute("UPDATE users SET gender='legacy' WHERE gender IS NULL")
+    conn.commit()
+except Exception:
+    # колонка уже есть — пропускаем
     pass
 
 # Подгружаем REFERRAL_REWARD из базы (если есть), иначе записываем туда дефолт
@@ -531,7 +543,7 @@ async def process_subgram_check(user: types.User, chat_id: int, api_kwargs: dict
         await bot.send_message(chat_id, text, reply_markup=kb)
         return False
 
-    # ----- 2) Статус gender: спрашиваем пол -----
+    # ----- 2) Статус gender: спрашиваем пол (подстраховка, если наш пол не пришёл) -----
     if status == "gender":
         text = "Укажите ваш пол:"
         rows = [[
@@ -584,7 +596,7 @@ async def process_subgram_check(user: types.User, chat_id: int, api_kwargs: dict
         await bot.send_message(chat_id, text, reply_markup=kb)
         return False
 
-    # ----- Всё остальное (ок, finished, пустой статус и т.п.) — не блокируем -----
+    # ----- Всё остальное (ok, finished, пустой статус и т.п.) — не блокируем -----
     return True
 
 
@@ -926,31 +938,39 @@ async def start_handler(message: types.Message):
         )
         conn.commit()
 
-        # уведомление о новом входе (как раньше, если без реферала)
-        if referrer_id == 0:
-            try:
-                joined_disp = await resolve_username_display(user_id)
+        # уведомление о новом входе (теперь и с рефералом)
+        try:
+            joined_disp = await resolve_username_display(user_id)
+            if referrer_id == 0:
                 admin_text = (
                     "🆕 <b>Новый вход</b>\n"
                     f"👤 Вошёл: {joined_disp} (ID: <code>{user_id}</code>)\n"
                     f"🤝 Пригласил: @— (ID: <code>—</code>)\n"
                     f"🕒 {join_date}"
                 )
-                await notify_admin_channel(admin_text)
-            except Exception:
-                pass
+            else:
+                ref_disp = await resolve_username_display(referrer_id)
+                admin_text = (
+                    "🆕 <b>Новый вход по рефералу</b>\n"
+                    f"👤 Вошёл: {joined_disp} (ID: <code>{user_id}</code>)\n"
+                    f"🤝 Пригласил: {ref_disp} (ID: <code>{referrer_id}</code>)\n"
+                    f"🕒 {join_date}"
+                )
+            await notify_admin_channel(admin_text)
+        except Exception:
+            pass
     else:
         referral_link = row[8] if row and row[8] else f"https://t.me/{bot_username}?start={user_id}"
         cursor.execute("UPDATE users SET username=?, referral_link=? WHERE user_id=?", (username, referral_link, user_id))
         conn.commit()
 
-    # На /start сначала проверяем SubGram + твоих спонсоров
+    # На /start сначала проверяем пол, SubGram + твоих спонсоров
     ok = await ensure_subscribed(user_id, message)
     if not ok:
-        # SubGram и/или ручные спонсоры уже показали задания — ждём действий пользователя
+        # Либо задали вопрос о поле, либо показали спонсоров — дальше ждём действий пользователя
         return
 
-    # Если уже подписан и всё ок — просто показать меню
+    # Если всё ок — просто показать меню
     await safe_answer_message(message, "🔝 Главное меню", reply_markup=main_menu_keyboard())
 
 
@@ -1049,14 +1069,15 @@ async def rating_callbacks(callback: types.CallbackQuery):
     await callback.answer()
 
 
-# ---------- Общий хелпер: SubGram + рефералка + ручные спонсоры ----------
+# ---------- Общий хелпер: пол + SubGram + рефералка + ручные спонсоры ----------
 
 async def ensure_subscribed(user_id: int, carrier, skip_subgram: bool = False) -> bool:
     """
     Быстрая проверка доступа:
-    1) SubGram (если не skip_subgram).
+    0) Один раз спрашиваем пол (Муж👨 / Жен👩) и сохраняем в users.gender.
+    1) SubGram (если не skip_subgram, с учётом пола).
     2) Проверка ТВОИХ ручных спонсоров.
-    3) Если всё ок — отмечаем в БД, один раз выдаём приветствие и реф-награду.
+    3) Если всё ок — отмечаем в БД подписку, один раз выдаём приветствие и реф-награду.
     """
     user: types.User | None = None
     chat_id: int | None = None
@@ -1068,9 +1089,39 @@ async def ensure_subscribed(user_id: int, carrier, skip_subgram: bool = False) -
         user = carrier.from_user
         chat_id = carrier.message.chat.id
 
-    # Шаг 1. SubGram
+    # Шаг -1. Загружаем пользователя из БД
+    cursor.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
+    row_user = cursor.fetchone()
+    if not row_user:
+        # на всякий случай, если кто-то написал, не пройдя /start
+        return True
+
+    # gender — последний столбец (index 12), если он есть
+    gender = None
+    if len(row_user) > 12:
+        gender = row_user[12]
+
+    # Шаг 0. Если пол ещё не выбран — спрашиваем
+    if gender not in ("male", "female", "legacy"):
+        if user and chat_id:
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[[
+                    InlineKeyboardButton(text="Муж👨", callback_data="gender_male"),
+                    InlineKeyboardButton(text="Жен👩", callback_data="gender_female"),
+                ]]
+            )
+            if isinstance(carrier, types.Message):
+                await carrier.answer("Выберите ваш пол:", reply_markup=kb)
+            elif isinstance(carrier, types.CallbackQuery):
+                await carrier.message.answer("Выберите ваш пол:", reply_markup=kb)
+        return False
+
+    # Шаг 1. SubGram (с учётом пола, если он есть)
     if not skip_subgram and user and chat_id:
-        ok_sub = await process_subgram_check(user, chat_id)
+        api_kwargs = {}
+        if gender in ("male", "female"):
+            api_kwargs["gender"] = gender
+        ok_sub = await process_subgram_check(user, chat_id, api_kwargs if api_kwargs else None)
         if not ok_sub:
             return False
 
@@ -1081,12 +1132,6 @@ async def ensure_subscribed(user_id: int, carrier, skip_subgram: bool = False) -
             return False
 
     # Шаг 2. Отметить подписку и, если первый раз, выдать приветствие + рефералку
-    cursor.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
-    row_user = cursor.fetchone()
-    if not row_user:
-        # на всякий случай, если кто-то написал, не пройдя /start
-        return True
-
     subscribed_flag = row_user[2] or 0
     username = row_user[1] or "None"
     referrer_id = row_user[7]
@@ -1113,7 +1158,7 @@ async def ensure_subscribed(user_id: int, carrier, skip_subgram: bool = False) -
             parse_mode="HTML"
         )
 
-        # Реферальная логика (1 раз)
+        # Реферальная логика (1 раз, только после подписки)
         if referrer_id and referrer_id != user_id:
             ref_disp = await resolve_username_display(referrer_id)
             joined_disp = await resolve_username_display(user_id)
@@ -1184,6 +1229,36 @@ async def ensure_subscribed(user_id: int, carrier, skip_subgram: bool = False) -
     return True
 
 
+# ---------------------- callback-и для выбора пола ----------------------
+
+@dp.callback_query(lambda c: c.data in ("gender_male", "gender_female"))
+async def gender_select_callback(callback: types.CallbackQuery):
+    """
+    Наш внутренний вопрос о поле: Муж👨 / Жен👩.
+    Вызывается один раз, результат сохраняется в users.gender,
+    сообщение с выбором пола удаляется, затем запускается ensure_subscribed,
+    который уже покажет спонсоров / меню.
+    """
+    user_id = callback.from_user.id
+    gender_code = "male" if callback.data == "gender_male" else "female"
+
+    try:
+        cursor.execute("UPDATE users SET gender=? WHERE user_id=?", (gender_code, user_id))
+        conn.commit()
+    except Exception as e:
+        _qwarn(f"[WARN] store gender failed: {type(e).__name__}")
+
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
+    await callback.answer()
+
+    # После выбора пола запускаем общую проверку (SubGram + спонсоры + рефка)
+    await ensure_subscribed(user_id, callback)
+
+
 # ---------------------- SubGram callback-и ----------------------
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("subgram"))
@@ -1210,10 +1285,19 @@ async def subgram_callbacks(callback: types.CallbackQuery):
         api_kwargs["age"] = data.split("_")[2]
     # для subgram-op api_kwargs остаётся пустым
 
+    # добавляем сохранённый в БД пол, если он уже есть и ещё не добавлен
+    try:
+        cursor.execute("SELECT gender FROM users WHERE user_id=?", (callback.from_user.id,))
+        row = cursor.fetchone()
+        if row and row[0] and row[0] not in ("legacy",) and "gender" not in api_kwargs:
+            api_kwargs["gender"] = row[0]
+    except Exception:
+        pass
+
     await callback.answer()
 
     # повторно идём в SubGram с уточнением пола/возраста или проверкой подписки
-    ok_sub = await process_subgram_check(callback.from_user, callback.message.chat.id, api_kwargs)
+    ok_sub = await process_subgram_check(callback.from_user, callback.message.chat.id, api_kwargs if api_kwargs else None)
     if not ok_sub:
         return
 
@@ -1243,10 +1327,10 @@ async def main_menu_handler(message: types.Message):
         return
 
     # ✅ при любом нажатии кнопки (любой текст в чате, кроме команд выше)
-    # повторно проверяем подписку на спонсоров.
+    # повторно проверяем пол + подписку на спонсоров.
     ok = await ensure_subscribed(uid, message)
     if not ok:
-        # если не подписан — ensure_subscribed уже показал задания и останавливаем обработку
+        # если не подписан / не выбрал пол — ensure_subscribed уже показал нужные шаги и останавливаем обработку
         return
 
     nav_buttons = {
@@ -1357,6 +1441,8 @@ async def main_menu_handler(message: types.Message):
         return
 
     # ----- выводы / профиль / инфо -----
+
+
     state = user_states.get(user_id)
     if state:
         stage = state.get("stage")
@@ -1649,7 +1735,7 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
 async def withdraw_confirm_handlers(callback: types.CallbackQuery):
     user_id = callback.from_user.id
 
-    # при любом нажатии inline-кнопок, связанных с выводом, тоже проверяем спонсоров
+    # при любом нажатии inline-кнопок, связанных с выводом, тоже проверяем пол + спонсоров
     ok = await ensure_subscribed(user_id, callback)
     if not ok:
         await callback.answer()
