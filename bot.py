@@ -880,6 +880,61 @@ async def cmd_broadcast(message: types.Message):
 async def cmd_myid(message: types.Message):
     await safe_answer_message(message, f"🆔 Твой user_id: {message.from_user.id}")
 
+@dp.message(Command("recheck_cis"))
+async def cmd_recheck_cis(message: types.Message):
+    """
+    Админ-команда: пересканировать ВСЕХ пользователей в базе и
+    заблокировать тех, у кого language_code Telegram не из списка CIS_LANG_CODES.
+    Работает без запроса номера, только по языку интерфейса Telegram.
+    """
+    admin_id = message.from_user.id
+    if not await has_admin_access(admin_id):
+        await safe_answer_message(message, "❌ У вас нет доступа. Войдите через /arisadminslipjiko.")
+        return
+
+    await safe_answer_message(message, "⏳ Запускаю проверку пользователей по языку Telegram...", reply_markup=admin_menu_kb())
+
+    cursor.execute("SELECT user_id FROM users WHERE blocked=0")
+    rows = cursor.fetchall() or []
+
+    total = len(rows)
+    checked = 0
+    blocked = 0
+
+    for r in rows:
+        try:
+            uid = int(r[0])
+        except Exception:
+            continue
+
+        try:
+            chat = await bot.get_chat(uid)
+            lang = getattr(chat, "language_code", None)
+            if not lang:
+                continue
+            lang = lang.split("-")[0].lower()
+        except Exception:
+            continue
+
+        checked += 1
+        if lang not in CIS_LANG_CODES:
+            try:
+                await block_user_everywhere(uid)
+            except Exception:
+                pass
+            blocked += 1
+
+        if checked % 50 == 0:
+            await asyncio.sleep(0.3)
+
+    await safe_send_message(
+        admin_id,
+        f"✅ Проверка завершена.\nВсего в базе (не заблокированных): {total}\nПроверено по языку: {checked}\nАвтоматически заблокировано: {blocked}",
+        reply_markup=admin_menu_kb(),
+    )
+
+
+
 
 @dp.message(lambda m: m.from_user.id in admin_login_states)
 async def admin_password_handler(message: types.Message):
