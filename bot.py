@@ -906,137 +906,19 @@ async def admin_password_handler(message: types.Message):
         await safe_answer_message(message, "❌ Неверный пароль. Вход в админ-панель отклонён.")
 
 
-# ---------------------- СНГ по телефону ----------------------
-
-def normalize_phone_number(raw: str) -> str:
-    if not raw:
-        return ""
-    raw = raw.strip()
-    if not raw.startswith("+"):
-        raw = "+" + raw
-    # убираем пробелы и дефисы
-    res = "+" + "".join(ch for ch in raw if ch.isdigit())
-    return res
-
-
-def is_cis_phone(phone: str) -> bool:
-    p = normalize_phone_number(phone)
-    for pref in CIS_PHONE_PREFIXES:
-        if p.startswith(pref):
-            return True
-    return False
-
+# ---------------------- СНГ по телефону (отключено) ----------------------
 
 async def ensure_cis_access(user_id: int, carrier) -> bool:
     """
-    Проверяем, что у пользователя номер телефона из стран СНГ.
-    Если телефона нет — просим отправить контакт.
-    Если номер не СНГ — блокируем в боте и каналах.
+    Проверка по номеру телефона отключена.
+    Бот больше не запрашивает контакт и не ограничивает пользователей по коду страны.
+    Всех пропускаем дальше.
     """
-    try:
-        cursor.execute("SELECT phone, cis_ok FROM users WHERE user_id=?", (user_id,))
-        row = cursor.fetchone()
-    except Exception as e:
-        _qwarn(f"[WARN] ensure_cis_access DB error: {type(e).__name__}")
-        return True
-
-    if not row:
-        # На всякий случай, но обычно user уже есть
-        return True
-
-    phone, cis_ok = row if len(row) == 2 else (None, 1)
-
-    # Уже помечен как не-СНГ — гарантированно блокируем
-    if cis_ok == 0:
-        await block_user_everywhere(user_id)
-        txt = "🚫 Наш бот доступен только пользователям с номерами стран СНГ."
-        if isinstance(carrier, types.Message):
-            await safe_answer_message(carrier, txt, reply_markup=ReplyKeyboardRemove())
-        elif isinstance(carrier, types.CallbackQuery):
-            await carrier.message.answer(txt, reply_markup=ReplyKeyboardRemove())
-        return False
-
-    # Телефона нет — просим отправить контакт
-    if not phone:
-        kb = ReplyKeyboardMarkup(
-            keyboard=[[KeyboardButton(text="📱 Отправить номер", request_contact=True)]],
-            resize_keyboard=True,
-            one_time_keyboard=True
-        )
-        txt = "Для использования бота нужно подтвердить номер телефона страны СНГ.\n\nНажми кнопку ниже, чтобы отправить свой номер."
-        if isinstance(carrier, types.Message):
-            await safe_answer_message(carrier, txt, reply_markup=kb)
-        elif isinstance(carrier, types.CallbackQuery):
-            await carrier.message.answer(txt, reply_markup=kb)
-        return False
-
-    # Телефон есть, но cis_ok может быть NULL — пересчитаем
-    if cis_ok is None:
-        if is_cis_phone(phone):
-            try:
-                cursor.execute("UPDATE users SET cis_ok=1 WHERE user_id=?", (user_id,))
-                conn.commit()
-            except Exception:
-                pass
-            return True
-        else:
-            try:
-                cursor.execute("UPDATE users SET cis_ok=0 WHERE user_id=?", (user_id,))
-                conn.commit()
-            except Exception:
-                pass
-            await block_user_everywhere(user_id)
-            txt = "🚫 Наш бот доступен только пользователям с номерами стран СНГ."
-            if isinstance(carrier, types.Message):
-                await safe_answer_message(carrier, txt, reply_markup=ReplyKeyboardRemove())
-            elif isinstance(carrier, types.CallbackQuery):
-                await carrier.message.answer(txt, reply_markup=ReplyKeyboardRemove())
-            return False
-
-    # cis_ok == 1
     return True
 
 
-@dp.message(lambda m: m.contact is not None)
-async def contact_handler(message: types.Message):
-    """
-    Ловим контакт от пользователя, сохраняем номер, проверяем СНГ
-    и при необходимости блокируем.
-    """
-    user_id = message.from_user.id
-    contact = message.contact
-
-    # игнорируем чужие номера
-    if contact.user_id and contact.user_id != user_id:
-        await safe_answer_message(message, "Отправьте, пожалуйста, свой номер, а не чужой.")
-        return
-
-    phone = contact.phone_number
-    cis_flag = 1 if is_cis_phone(phone) else 0
-
-    try:
-        cursor.execute("UPDATE users SET phone=?, cis_ok=? WHERE user_id=?", (phone, cis_flag, user_id))
-        conn.commit()
-    except Exception as e:
-        _qwarn(f"[WARN] store phone failed: {type(e).__name__}")
-
-    if cis_flag == 0:
-        await block_user_everywhere(user_id)
-        await safe_answer_message(
-            message,
-            "🚫 Наш бот доступен только пользователям с номерами стран СНГ.",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return
-
-    await safe_answer_message(
-        message,
-        "✅ Спасибо! Номер подтверждён, доступ к боту открыт.",
-        reply_markup=main_menu_keyboard()
-    )
-
-
 # ---------------------- /start ----------------------
+
 
 @dp.message(CommandStart())
 async def start_handler(message: types.Message):
