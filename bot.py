@@ -84,7 +84,9 @@ CREATE TABLE IF NOT EXISTS users (
     created_at TEXT,
     blocked INTEGER DEFAULT 0,
     delivery_failed INTEGER DEFAULT 0,
-    gender TEXT
+    gender TEXT,
+    phone TEXT,
+    cis_ok INTEGER DEFAULT 1
 );
 """)
 
@@ -152,6 +154,20 @@ try:
 except Exception:
     pass
 
+# Новый столбец для телефона
+try:
+    cursor.execute("ALTER TABLE users ADD COLUMN phone TEXT")
+    conn.commit()
+except Exception:
+    pass
+
+# Новый столбец: cis_ok (1 — СНГ, 0 — не СНГ)
+try:
+    cursor.execute("ALTER TABLE users ADD COLUMN cis_ok INTEGER DEFAULT 1")
+    conn.commit()
+except Exception:
+    pass
+
 # Подгружаем REFERRAL_REWARD из базы (если есть), иначе записываем туда дефолт
 try:
     cursor.execute("SELECT value FROM config WHERE key='referral_reward'")
@@ -185,6 +201,22 @@ _stats_cache_withdrawn = BASE_WITHDRAWN
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
+
+# --- СНГ по телефонным кодам ---
+CIS_PHONE_PREFIXES = (
+    "+7",    # Россия, Казахстан
+    "+375",  # Беларусь
+    "+380",  # Украина
+    "+374",  # Армения
+    "+994",  # Азербайджан
+    "+996",  # Кыргызстан
+    "+992",  # Таджикистан
+    "+998",  # Узбекистан
+    "+373",  # Молдова
+    "+995",  # Грузия
+    "+993",  # Туркменистан
+)
+
 
 # ---------------------- ВСПОМОГАТЕЛЬНЫЕ ----------------------
 
@@ -310,6 +342,49 @@ async def resolve_username_display(user_id: int) -> str:
         return name or "—"
     except Exception:
         return "—"
+
+
+# ========= Блокировка/разблокировка везде (бот + каналы) =========
+
+async def ban_in_required_channels(target_user_id: int):
+    for open_link, check_target in SPONSORS_REQUIRED:
+        chat = normalize_chat_target(check_target or open_link)
+        try:
+            await bot.ban_chat_member(chat_id=chat, user_id=target_user_id)
+        except TelegramForbiddenError:
+            # нет прав — просто игнорируем
+            pass
+        except Exception as e:
+            _qwarn(f"[WARN] ban_chat_member failed for {chat}: {type(e).__name__}")
+
+
+async def unban_in_required_channels(target_user_id: int):
+    for open_link, check_target in SPONSORS_REQUIRED:
+        chat = normalize_chat_target(check_target or open_link)
+        try:
+            await bot.unban_chat_member(chat_id=chat, user_id=target_user_id)
+        except TelegramForbiddenError:
+            pass
+        except Exception as e:
+            _qwarn(f"[WARN] unban_chat_member failed for {chat}: {type(e).__name__}")
+
+
+async def block_user_everywhere(target_user_id: int):
+    try:
+        cursor.execute("UPDATE users SET blocked=1 WHERE user_id=?", (target_user_id,))
+        conn.commit()
+    except Exception as e:
+        _qwarn(f"[WARN] DB block_user_everywhere failed: {type(e).__name__}")
+    await ban_in_required_channels(target_user_id)
+
+
+async def unblock_user_everywhere(target_user_id: int):
+    try:
+        cursor.execute("UPDATE users SET blocked=0 WHERE user_id=?", (target_user_id,))
+        conn.commit()
+    except Exception as e:
+        _qwarn(f"[WARN] DB unblock_user_everywhere failed: {type(e).__name__}")
+    await unban_in_required_channels(target_user_id)
 
 
 # ====== Ручные спонсоры (помимо SubGram) ======
@@ -831,6 +906,136 @@ async def admin_password_handler(message: types.Message):
         await safe_answer_message(message, "❌ Неверный пароль. Вход в админ-панель отклонён.")
 
 
+# ---------------------- СНГ по телефону ----------------------
+
+def normalize_phone_number(raw: str) -> str:
+    if not raw:
+        return ""
+    raw = raw.strip()
+    if not raw.startswith("+"):
+        raw = "+" + raw
+    # убираем пробелы и дефисы
+    res = "+" + "".join(ch for ch in raw if ch.isdigit())
+    return res
+
+
+def is_cis_phone(phone: str) -> bool:
+    p = normalize_phone_number(phone)
+    for pref in CIS_PHONE_PREFIXES:
+        if p.startswith(pref):
+            return True
+    return False
+
+
+async def ensure_cis_access(user_id: int, carrier) -> bool:
+    """
+    Проверяем, что у пользователя номер телефона из стран СНГ.
+    Если телефона нет — просим отправить контакт.
+    Если номер не СНГ — блокируем в боте и каналах.
+    """
+    try:
+        cursor.execute("SELECT phone, cis_ok FROM users WHERE user_id=?", (user_id,))
+        row = cursor.fetchone()
+    except Exception as e:
+        _qwarn(f"[WARN] ensure_cis_access DB error: {type(e).__name__}")
+        return True
+
+    if not row:
+        # На всякий случай, но обычно user уже есть
+        return True
+
+    phone, cis_ok = row if len(row) == 2 else (None, 1)
+
+    # Уже помечен как не-СНГ — гарантированно блокируем
+    if cis_ok == 0:
+        await block_user_everywhere(user_id)
+        txt = "🚫 Наш бот доступен только пользователям с номерами стран СНГ."
+        if isinstance(carrier, types.Message):
+            await safe_answer_message(carrier, txt, reply_markup=ReplyKeyboardRemove())
+        elif isinstance(carrier, types.CallbackQuery):
+            await carrier.message.answer(txt, reply_markup=ReplyKeyboardRemove())
+        return False
+
+    # Телефона нет — просим отправить контакт
+    if not phone:
+        kb = ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text="📱 Отправить номер", request_contact=True)]],
+            resize_keyboard=True,
+            one_time_keyboard=True
+        )
+        txt = "Для использования бота нужно подтвердить номер телефона страны СНГ.\n\nНажми кнопку ниже, чтобы отправить свой номер."
+        if isinstance(carrier, types.Message):
+            await safe_answer_message(carrier, txt, reply_markup=kb)
+        elif isinstance(carrier, types.CallbackQuery):
+            await carrier.message.answer(txt, reply_markup=kb)
+        return False
+
+    # Телефон есть, но cis_ok может быть NULL — пересчитаем
+    if cis_ok is None:
+        if is_cis_phone(phone):
+            try:
+                cursor.execute("UPDATE users SET cis_ok=1 WHERE user_id=?", (user_id,))
+                conn.commit()
+            except Exception:
+                pass
+            return True
+        else:
+            try:
+                cursor.execute("UPDATE users SET cis_ok=0 WHERE user_id=?", (user_id,))
+                conn.commit()
+            except Exception:
+                pass
+            await block_user_everywhere(user_id)
+            txt = "🚫 Наш бот доступен только пользователям с номерами стран СНГ."
+            if isinstance(carrier, types.Message):
+                await safe_answer_message(carrier, txt, reply_markup=ReplyKeyboardRemove())
+            elif isinstance(carrier, types.CallbackQuery):
+                await carrier.message.answer(txt, reply_markup=ReplyKeyboardRemove())
+            return False
+
+    # cis_ok == 1
+    return True
+
+
+@dp.message(lambda m: m.contact is not None)
+async def contact_handler(message: types.Message):
+    """
+    Ловим контакт от пользователя, сохраняем номер, проверяем СНГ
+    и при необходимости блокируем.
+    """
+    user_id = message.from_user.id
+    contact = message.contact
+
+    # игнорируем чужие номера
+    if contact.user_id and contact.user_id != user_id:
+        await safe_answer_message(message, "Отправьте, пожалуйста, свой номер, а не чужой.")
+        return
+
+    phone = contact.phone_number
+    cis_flag = 1 if is_cis_phone(phone) else 0
+
+    try:
+        cursor.execute("UPDATE users SET phone=?, cis_ok=? WHERE user_id=?", (phone, cis_flag, user_id))
+        conn.commit()
+    except Exception as e:
+        _qwarn(f"[WARN] store phone failed: {type(e).__name__}")
+
+    if cis_flag == 0:
+        await block_user_everywhere(user_id)
+        await safe_answer_message(
+            message,
+            "🚫 Наш бот доступен только пользователям с номерами стран СНГ.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return
+
+    await safe_answer_message(
+        message,
+        "✅ Спасибо! Номер подтверждён, доступ к боту открыт.",
+        reply_markup=main_menu_keyboard()
+    )
+
+
 # ---------------------- /start ----------------------
 
 @dp.message(CommandStart())
@@ -873,6 +1078,10 @@ async def start_handler(message: types.Message):
         referral_link = row[8] if row and row[8] else f"https://t.me/{bot_username}?start={user_id}"
         cursor.execute("UPDATE users SET username=?, referral_link=? WHERE user_id=?", (username, referral_link, user_id))
         conn.commit()
+
+    ok_cis = await ensure_cis_access(user_id, message)
+    if not ok_cis:
+        return
 
     ok = await ensure_subscribed(user_id, message)
     if not ok:
@@ -975,12 +1184,18 @@ async def rating_callbacks(callback: types.CallbackQuery):
 
 async def ensure_subscribed(user_id: int, carrier, skip_subgram: bool = False) -> bool:
     """
-    0) Один раз спрашиваем пол (Муж👨 / Жен👩) и сохраняем в users.gender.
+    0) Проверка телефона СНГ (ensure_cis_access)
+       и один раз спрашиваем пол (Муж👨 / Жен👩), сохраняем в users.gender.
     1) SubGram (если не skip_subgram, с учётом пола).
     2) Проверка ТВОИХ ручных спонсоров.
     3) Если всё ок — отмечаем в БД подписку, один раз выдаём приветствие,
        отправляем админ-уведомление и реф-награду (ТОЛЬКО после подписки).
     """
+    # СНГ-проверка
+    ok_cis = await ensure_cis_access(user_id, carrier)
+    if not ok_cis:
+        return False
+
     user: types.User | None = None
     chat_id: int | None = None
 
@@ -1005,7 +1220,6 @@ async def ensure_subscribed(user_id: int, carrier, skip_subgram: bool = False) -
         if user and chat_id:
             kb = InlineKeyboardMarkup(
                 inline_keyboard=[[
-
                     InlineKeyboardButton(text="Муж👨", callback_data="gender_male"),
                     InlineKeyboardButton(text="Жен👩", callback_data="gender_female"),
                 ]]
@@ -1222,6 +1436,7 @@ async def main_menu_handler(message: types.Message):
         admin_actions.pop(uid, None)
         return
 
+    # СНГ + подписка
     ok = await ensure_subscribed(uid, message)
     if not ok:
         return
@@ -1540,8 +1755,7 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
         await safe_answer_message(
             message,
             f"✅ Новая награда за реферала установлена: {new_reward}⭐️",
-            reply_markup=admin_menu_kb()
-        )
+            reply_markup=admin_menu_kk())
         return True
 
     if step == "user":
@@ -1566,10 +1780,13 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
                 await safe_answer_message(message, "❗ Такого пользователя нет в базе.", reply_markup=admin_menu_kb())
                 admin_actions.pop(uid, None)
                 return True
-            new_status = 0 if row[0] == 1 else 1
-            cursor.execute("UPDATE users SET blocked=? WHERE user_id=?", (new_status, target_id))
-            conn.commit()
-            status_text = "заблокирован" if new_status == 1 else "разблокирован"
+            current_status = row[0]
+            if current_status == 1:
+                await unblock_user_everywhere(target_id)
+                status_text = "разблокирован"
+            else:
+                await block_user_everywhere(target_id)
+                status_text = "заблокирован"
             admin_actions.pop(uid, None)
             await safe_answer_message(message, f"🚫 Пользователь {target_id} {status_text}.", reply_markup=admin_menu_kb())
             return True
@@ -1578,7 +1795,7 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
             state["await"] = "amount"
             state["target_id"] = target_id
             admin_actions[uid] = state
-            await safe_answer_message(message, f"💳 Ок. Сколько ⭐️ начислить пользователю {target_id}? Напишите число. («отмена» для выхода)", reply_markup=admin_menu_kб())
+            await safe_answer_message(message, f"💳 Ок. Сколько ⭐️ начислить пользователю {target_id}? Напишите число. («отмена» для выхода)", reply_markup=admin_menu_kb())
             return True
 
     if step == "amount" and mode == "grant":
