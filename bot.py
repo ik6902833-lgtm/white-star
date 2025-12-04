@@ -1749,7 +1749,7 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
         await safe_answer_message(
             message,
             f"✅ Новая награда за реферала установлена: {new_reward}⭐️",
-            reply_markup=admin_menu_kk())
+            reply_markup=admin_menu_kb())
         return True
 
     if step == "user":
