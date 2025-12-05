@@ -35,12 +35,11 @@ RATING_IMG_PATH = os.path.join(BASE_DIR, "images", "rating.png.png")
 BOT_USERNAME = "WhiteStarXBot"
 
 # --- твои ручные спонсоры (кроме SubGram) ---
-# (что открываем по кнопке, что проверяем по подписке)
 SPONSORS_REQUIRED = [
-    ("@WhiteStarXInfo", "@WhiteStarXInfo"),  # открытый канал, проверяем напрямую
+    ("@WhiteStarXInfo", "@WhiteStarXInfo"),
 ]
 
-SPONSORS_OPTIONAL = []  # опциональных спонсоров сейчас нет
+SPONSORS_OPTIONAL = []
 
 # ---------- SubGram настройки ----------
 SUBGRAM_API_KEY = "e263a455ef68c942129a72539abe515457c5df8f840cf4e333c4777e1e66a789"
@@ -48,23 +47,19 @@ SUBGRAM_URL = "https://api.subgram.org/get-sponsors"
 SUBGRAM_BLOCKING_STATUSES = ["warning", "gender", "age", "register"]
 # ---------------------------------------
 
-# Базовые значения (дефолт). REFERRAL_REWARD дальше переопределяется из базы.
 REFERRAL_REWARD = 4
 REFERRAL_BONUS_EVERY = 10
 REFERRAL_BONUS_AMOUNT = 10
 
-# Порог оставлен как константа, но не используется для отказа в награде
 YOUNG_ACCOUNT_THRESHOLD = 7_500_000_000
 
 CHANNEL_FOR_WITHDRAW = -1003003114178
 INSTRUCTION_LINK = "https://t.me/+JIE3W3PVNYdjYjM6"
 ADMIN_PASSWORD = "jikolpkolp"
 
-# ссылки для кнопок в рассылке
 BROADCAST_EARN_LINK = "https://t.me/WhiteStarXBot?start=1305040918"
 BROADCAST_REF_LINK = "https://t.me/+JIE3W3PVNYdjYjM6"
 
-# Тихие логи — персональные данные не печатаем
 QUIET_LOGGING = False
 
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -112,7 +107,6 @@ CREATE TABLE IF NOT EXISTS withdrawals (
 )
 """)
 
-# Логи рассылок
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS broadcast_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -127,7 +121,6 @@ CREATE TABLE IF NOT EXISTS broadcast_logs (
 )
 """)
 
-# Новая таблица конфигурации (в том числе для награды за реферала)
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS config (
     key TEXT PRIMARY KEY,
@@ -137,45 +130,40 @@ CREATE TABLE IF NOT EXISTS config (
 
 conn.commit()
 
-# На случай старой базы без delivery_failed — аккуратный ALTER
 try:
     cursor.execute("ALTER TABLE users ADD COLUMN delivery_failed INTEGER DEFAULT 0")
     conn.commit()
 except Exception:
     pass
 
-# Новый столбец для пола пользователя
 try:
     cursor.execute("ALTER TABLE users ADD COLUMN gender TEXT")
     conn.commit()
-    # Все, кто уже был в базе, помечаем как 'legacy', чтобы им не показывать вопрос про пол
     cursor.execute("UPDATE users SET gender='legacy' WHERE gender IS NULL")
     conn.commit()
 except Exception:
     pass
 
-# Новый столбец для телефона
 try:
     cursor.execute("ALTER TABLE users ADD COLUMN phone TEXT")
     conn.commit()
 except Exception:
     pass
 
-# Новый столбец: cis_ok (1 — СНГ, 0 — не СНГ)
 try:
     cursor.execute("ALTER TABLE users ADD COLUMN cis_ok INTEGER DEFAULT 1")
     conn.commit()
 except Exception:
     pass
 
-# Новый столбец: admin_msg_id для хранения id сообщения в ТГК с заявкой на вывод
+# новый столбец admin_msg_id – сообщение в ТГК
 try:
     cursor.execute("ALTER TABLE withdrawals ADD COLUMN admin_msg_id INTEGER")
     conn.commit()
 except Exception:
     pass
 
-# Подгружаем REFERRAL_REWARD из базы (если есть), иначе записываем туда дефолт
+# загрузка REFERRAL_REWARD из config
 try:
     cursor.execute("SELECT value FROM config WHERE key='referral_reward'")
     row = cursor.fetchone()
@@ -209,23 +197,20 @@ _stats_cache_withdrawn = BASE_WITHDRAWN
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
-# --- СНГ по телефонным кодам ---
 CIS_PHONE_PREFIXES = (
-    "+7",    # Россия, Казахстан
-    "+375",  # Беларусь
-    "+380",  # Украина
-    "+374",  # Армения
-    "+994",  # Азербайджан
-    "+996",  # Кыргызстан
-    "+992",  # Таджикистан
-    "+998",  # Узбекистан
-    "+373",  # Молдова
-    "+995",  # Грузия
-    "+993",  # Туркменистан
+    "+7",
+    "+375",
+    "+380",
+    "+374",
+    "+994",
+    "+996",
+    "+992",
+    "+998",
+    "+373",
+    "+995",
+    "+993",
 )
 
-
-# ---------------------- ВСПОМОГАТЕЛЬНЫЕ ----------------------
 
 def _qwarn(msg: str):
     if not QUIET_LOGGING:
@@ -351,15 +336,12 @@ async def resolve_username_display(user_id: int) -> str:
         return "—"
 
 
-# ========= Блокировка/разблокировка везде (бот + каналы + заявки) =========
-
 async def ban_in_required_channels(target_user_id: int):
     for open_link, check_target in SPONSORS_REQUIRED:
         chat = normalize_chat_target(check_target or open_link)
         try:
             await bot.ban_chat_member(chat_id=chat, user_id=target_user_id)
         except TelegramForbiddenError:
-            # нет прав — просто игнорируем
             pass
         except Exception as e:
             _qwarn(f"[WARN] ban_chat_member failed for {chat}: {type(e).__name__}")
@@ -378,39 +360,46 @@ async def unban_in_required_channels(target_user_id: int):
 
 async def block_user_everywhere(target_user_id: int):
     """
-    Блокировка пользователя:
-    - пометить blocked=1;
-    - обнулить профиль (баланс, рефералы, заработано);
-    - удалить все его заявки из базы;
-    - удалить сообщения с заявками в ТГК (CHANNEL_FOR_WITHDRAW);
-    - заблокировать в спонсорских каналах.
+    Полная блокировка пользователя:
+    - удаляем ВСЕ его выводы (из БД и сообщения в ТГК + в ЛС),
+    - обнуляем профиль,
+    - удаляем реферальные связи,
+    - ставим blocked=1,
+    - баним в спонсорских каналах.
     """
     try:
-        # забрать все его заявки, чтобы удалить сообщения в ТГК
-        cursor.execute("SELECT id, admin_msg_id FROM withdrawals WHERE user_id=?", (target_user_id,))
+        # берём все его заявки, чтобы удалить сообщения и в канале, и у пользователя
+        cursor.execute("SELECT id, admin_msg_id, user_msg_id FROM withdrawals WHERE user_id=?", (target_user_id,))
         rows = cursor.fetchall() or []
 
-        for wid, admin_msg_id in rows:
+        for wid, admin_msg_id, user_msg_id in rows:
+            # сообщение в ТГ-канале (заявка #...)
             if admin_msg_id:
                 try:
                     await bot.delete_message(CHANNEL_FOR_WITHDRAW, admin_msg_id)
                 except Exception:
-                    # если сообщение уже удалено или нет прав — просто игнор
                     pass
 
-        # удалить сами заявки из базы
+            # сообщение в ЛС пользователю "заявка создана"
+            if user_msg_id:
+                try:
+                    await bot.delete_message(target_user_id, user_msg_id)
+                except Exception:
+                    pass
+
+        # сами заявки удаляем из таблицы
         cursor.execute("DELETE FROM withdrawals WHERE user_id=?", (target_user_id,))
 
-        # обнулить профиль: баланс, рефералы, заработок
+        # обнуляем баланс / рефералы / заработок
         cursor.execute(
             "UPDATE users SET balance=0, referrals_count=0, total_earned=0 WHERE user_id=?",
             (target_user_id,)
         )
 
-        # удалить реферальные связи (и как реферер, и как приглашённый)
+        # чистим реферальные связи
         cursor.execute("DELETE FROM referral_rewards WHERE referrer_id=? OR referred_id=?", (target_user_id, target_user_id))
 
-        # пометить как заблокированного
+        # помечаем как заблокирован
         cursor.execute("UPDATE users SET blocked=1 WHERE user_id=?", (target_user_id,))
 
         conn.commit()
@@ -428,8 +417,6 @@ async def unblock_user_everywhere(target_user_id: int):
         _qwarn(f"[WARN] DB unblock_user_everywhere failed: {type(e).__name__}")
     await unban_in_required_channels(target_user_id)
 
-
-# ====== Ручные спонсоры (помимо SubGram) ======
 
 async def gather_manual_sponsors(user_id: int):
     required_missing = []
@@ -498,8 +485,6 @@ async def process_manual_sponsors(user: types.User, chat_id: int) -> bool:
     await bot.send_message(chat_id, text, reply_markup=kb)
     return False
 
-
-# ====== SubGram: /get-sponsors ======
 
 async def subgram_get_sponsors(user: types.User, chat_id: int, extra: dict | None = None) -> dict | None:
     headers = {"Auth": SUBGRAM_API_KEY}
@@ -598,7 +583,6 @@ async def process_subgram_check(user: types.User, chat_id: int, api_kwargs: dict
         await bot.send_message(chat_id, text, reply_markup=kb)
         return False
 
-    # ---- статус gender от SubGram: задаём тот же вопрос, теми же кнопками ----
     if status == "gender":
         text = "Выберите ваш пол"
         rows = [[
@@ -650,8 +634,6 @@ async def process_subgram_check(user: types.User, chat_id: int, api_kwargs: dict
 
     return True
 
-
-# ====== РАССЫЛКА ======
 
 def broadcast_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -754,8 +736,6 @@ async def do_broadcast(admin_id: int, sample_chat_id: int, sample_message_id: in
     await safe_send_message(admin_id, report, parse_mode="HTML")
 
 
-# ----------------------------------------------------------------------------------
-
 def now_kyiv():
     return datetime.now(timezone(timedelta(hours=3)))
 
@@ -827,8 +807,6 @@ def admin_menu_kb() -> ReplyKeyboardMarkup:
     )
 
 
-# ---------------------- УТИЛИТЫ АДМИН-ДИАЛОГА ----------------------
-
 def normalize_username(u: str) -> str:
     u = (u or "").strip()
     if not u:
@@ -869,8 +847,6 @@ def parse_user_ref(text: str):
         return int(row[0]), row[1]
     return None, None
 
-
-# ---------------------- ДОСТУП И АДМИН-КОМАНДЫ ----------------------
 
 async def is_channel_admin(user_id: int, channel_id) -> bool:
     try:
@@ -925,11 +901,6 @@ async def cmd_myid(message: types.Message):
 
 @dp.message(Command("recheck_cis"))
 async def cmd_recheck_cis(message: types.Message):
-    """
-    Админ-команда: пересканировать ВСЕХ пользователей в базе и
-    заблокировать тех, у кого language_code Telegram не из списка CIS_LANG_CODES.
-    Работает без запроса номера, только по языку интерфейса Telegram.
-    """
     admin_id = message.from_user.id
     if not await has_admin_access(admin_id):
         await safe_answer_message(message, "❌ У вас нет доступа. Войдите через /arisadminslipjiko.")
@@ -1002,34 +973,24 @@ async def admin_password_handler(message: types.Message):
         await safe_answer_message(message, "❌ Неверный пароль. Вход в админ-панель отклонён.")
 
 
-# ---------------------- Ограничение по СНГ (по языку Telegram) ----------------------
-
 CIS_LANG_CODES = {
-    'ru',  # русский
-    'uk',  # украинский
-    'be',  # белорусский
-    'kk',  # казахский
-    'ky',  # кыргызский
-    'uz',  # узбекский
-    'tg',  # таджикский
-    'az',  # азербайджанский
-    'hy',  # армянский
-    'ro',  # молдавский / румынский
+    'ru',
+    'uk',
+    'be',
+    'kk',
+    'ky',
+    'uz',
+    'tg',
+    'az',
+    'hy',
+    'ro',
 }
 
-async def ensure_cis_access(user_id: int, carrier) -> bool:
-    """
-    Ограничение доступа по СНГ БЕЗ запроса номера телефона.
-    Telegram не отдаёт стране пользователя по API, поэтому мы ориентируемся
-    только на language_code аккаунта (язык интерфейса Telegram).
 
-    Если язык не из списка стран СНГ — пользователь помечается заблокированным,
-    и его пытаемся забанить во всех связанных каналах.
-    """
+async def ensure_cis_access(user_id: int, carrier) -> bool:
     user: types.User | None = None
     chat_id: int | None = None
 
-    # Определяем пользователя и чат из разных типов апдейта
     if isinstance(carrier, types.Message):
         user = carrier.from_user
         chat_id = carrier.chat.id
@@ -1042,12 +1003,10 @@ async def ensure_cis_access(user_id: int, carrier) -> bool:
             user = chat
             chat_id = user_id
         except Exception:
-            # Если вообще ничего не смогли получить — не блочим, чтобы не поломать бота
             return True
 
     lang = getattr(user, 'language_code', None)
     if not lang:
-        # Если язык не известен — считаем, что ок
         return True
 
     lang = lang.split('-')[0].lower()
@@ -1055,7 +1014,6 @@ async def ensure_cis_access(user_id: int, carrier) -> bool:
     if lang in CIS_LANG_CODES:
         return True
 
-    # Не СНГ — блокируем в базе и в каналах
     try:
         await block_user_everywhere(user_id)
     except Exception:
@@ -1067,9 +1025,6 @@ async def ensure_cis_access(user_id: int, carrier) -> bool:
             "🚫 Бот доступен только для пользователей из стран СНГ.",
         )
     return False
-
-
-# ---------------------- /start ----------------------
 
 
 @dp.message(CommandStart())
@@ -1106,8 +1061,6 @@ async def start_handler(message: types.Message):
             (user_id, username, 0, 1, 0, 0, 0, referrer_id, referral_link, join_date, 0)
         )
         conn.commit()
-        # ВАЖНО: тут НЕ отправляем ничего в админ-канал.
-        # Админ-уведомление и реф-награда будут только после подписки на спонсоров.
     else:
         referral_link = row[8] if row and row[8] else f"https://t.me/{bot_username}?start={user_id}"
         cursor.execute("UPDATE users SET username=?, referral_link=? WHERE user_id=?", (username, referral_link, user_id))
@@ -1123,8 +1076,6 @@ async def start_handler(message: types.Message):
 
     await safe_answer_message(message, "🔝 Главное меню", reply_markup=main_menu_keyboard())
 
-
-# ---------------------- Рейтинг / инфо / выводы и т.д. ----------------------
 
 async def build_rating_text(time_frame: str):
     cur = conn.cursor()
@@ -1214,18 +1165,7 @@ async def rating_callbacks(callback: types.CallbackQuery):
     await callback.answer()
 
 
-# ---------- Общий хелпер: пол + SubGram + рефералка + ручные спонсоры ----------
-
 async def ensure_subscribed(user_id: int, carrier, skip_subgram: bool = False) -> bool:
-    """
-    0) Проверка телефона СНГ (ensure_cis_access)
-       и один раз спрашиваем пол (Муж👨 / Жен👩), сохраняем в users.gender.
-    1) SubGram (если не skip_subgram, с учётом пола).
-    2) Проверка ТВОИХ ручных спонсоров.
-    3) Если всё ок — отмечаем в БД подписку, один раз выдаём приветствие,
-       отправляем админ-уведомление и реф-награду (ТОЛЬКО после подписки).
-    """
-    # СНГ-проверка
     ok_cis = await ensure_cis_access(user_id, carrier)
     if not ok_cis:
         return False
@@ -1249,24 +1189,20 @@ async def ensure_subscribed(user_id: int, carrier, skip_subgram: bool = False) -
     if len(row_user) > 12:
         gender = row_user[12]
 
-    # Шаг 0. ВОПРОС ПРО ПОЛ (наш, с двумя кнопками муж/жен)
     if gender not in ("male", "female", "legacy"):
         if user and chat_id:
             kb = InlineKeyboardMarkup(
                 inline_keyboard=[[
-
                     InlineKeyboardButton(text="Муж👨", callback_data="gender_male"),
                     InlineKeyboardButton(text="Жен👩", callback_data="gender_female"),
                 ]]
             )
-            # Сообщение + кнопки
             if isinstance(carrier, types.Message):
                 await carrier.answer("Выберите ваш пол", reply_markup=kb)
             elif isinstance(carrier, types.CallbackQuery):
                 await carrier.message.answer("Выберите ваш пол", reply_markup=kb)
         return False
 
-    # Шаг 1. SubGram (с учётом пола)
     if not skip_subgram and user and chat_id:
         api_kwargs = {}
         if gender in ("male", "female"):
@@ -1275,18 +1211,15 @@ async def ensure_subscribed(user_id: int, carrier, skip_subgram: bool = False) -
         if not ok_sub:
             return False
 
-    # Шаг 1.5. Ручные спонсоры
     if user and chat_id:
         ok_manual = await process_manual_sponsors(user, chat_id)
         if not ok_manual:
             return False
 
-    # Шаг 2. Отметить подписку и, если первый раз, выдать приветствие + реф-награду
     subscribed_flag = row_user[2] or 0
     username = row_user[1] or "None"
     referrer_id = row_user[7]
 
-    # Если раньше не был подписан — это ПЕРВАЯ успешная подписка
     if not subscribed_flag:
         cursor.execute("UPDATE users SET subscribed=1, first_time=0 WHERE user_id=?", (user_id,))
         conn.commit()
@@ -1294,7 +1227,6 @@ async def ensure_subscribed(user_id: int, carrier, skip_subgram: bool = False) -
         now_str = now_kyiv().isoformat()
         joined_disp = await resolve_username_display(user_id)
 
-        # ---- Админ-уведомление по факту "нормального" входа (после подписки) ----
         if not referrer_id or referrer_id == 0:
             admin_text = (
                 "🆕 <b>Новый вход</b>\n"
@@ -1304,7 +1236,6 @@ async def ensure_subscribed(user_id: int, carrier, skip_subgram: bool = False) -
             )
             await notify_admin_channel(admin_text)
 
-        # Приветствие пользователю
         await safe_send_message(user_id, "⭐️")
         await safe_send_message(
             user_id,
@@ -1321,7 +1252,6 @@ async def ensure_subscribed(user_id: int, carrier, skip_subgram: bool = False) -
             parse_mode="HTML"
         )
 
-        # ---- Реферальная логика: ТОЛЬКО после подписки, только сейчас ----
         if referrer_id and referrer_id != user_id:
             ref_disp = await resolve_username_display(referrer_id)
 
@@ -1391,8 +1321,6 @@ async def ensure_subscribed(user_id: int, carrier, skip_subgram: bool = False) -
     return True
 
 
-# ---------------------- callback-и для выбора пола ----------------------
-
 @dp.callback_query(lambda c: c.data in ("gender_male", "gender_female"))
 async def gender_select_callback(callback: types.CallbackQuery):
     user_id = callback.from_user.id
@@ -1413,8 +1341,6 @@ async def gender_select_callback(callback: types.CallbackQuery):
 
     await ensure_subscribed(user_id, callback)
 
-
-# ---------------------- SubGram callback-и ----------------------
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("subgram"))
 async def subgram_callbacks(callback: types.CallbackQuery):
@@ -1452,8 +1378,6 @@ async def subgram_callbacks(callback: types.CallbackQuery):
         await callback.message.answer("✅ Доступ предоставлен!", reply_markup=main_menu_keyboard())
 
 
-# ---------------------- Главный меню-хендлер ----------------------
-
 @dp.message()
 async def main_menu_handler(message: types.Message):
     uid = message.from_user.id
@@ -1471,7 +1395,6 @@ async def main_menu_handler(message: types.Message):
         admin_actions.pop(uid, None)
         return
 
-    # СНГ + подписка
     ok = await ensure_subscribed(uid, message)
     if not ok:
         return
@@ -1729,8 +1652,6 @@ async def main_menu_handler(message: types.Message):
     await safe_answer_message(message, "🔝 Главное меню", reply_markup=main_menu_keyboard())
 
 
-# ---------------------- Админ-диалог ----------------------
-
 async def maybe_handle_admin_dialog(message: types.Message) -> bool:
     uid = message.from_user.id
     if uid not in admin_actions:
@@ -1846,7 +1767,7 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
         target_id = state.get("target_id")
         if not target_id:
             admin_actions.pop(uid, None)
-            await safe_answer_message(message, "⚠️ Ошибка контекста. Начните заново.", reply_markup=admin_menu_kk())
+            await safe_answer_message(message, "⚠️ Ошибка контекста. Начните заново.", reply_markup=admin_menu_kb())
             return True
 
         cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (amount, target_id))
@@ -1866,8 +1787,6 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
     return True
 
 
-# ---------------------- Выводы (callbacks) ----------------------
-
 @dp.callback_query(lambda c: c.data and (c.data.startswith("confirm_amount:") or c.data == "withdraw_back" or c.data.startswith("create_withdraw:") or c.data.startswith("redo_withdraw_user:")))
 async def withdraw_confirm_handlers(callback: types.CallbackQuery):
     user_id = callback.from_user.id
@@ -1878,7 +1797,7 @@ async def withdraw_confirm_handlers(callback: types.CallbackQuery):
         return
 
     data = callback.data
-    admin_msg_id = None  # сюда сохраним id сообщения в ТГК с заявкой
+    admin_msg_id = None
 
     if data == "withdraw_back":
         user_states.pop(user_id, None)
@@ -2074,8 +1993,6 @@ async def admin_withdraw_handlers(callback: types.CallbackQuery):
         await safe_edit_text(callback.message, (callback.message.text or "") + "\n\n❌ Отклонено")
         return
 
-
-# ---------------------- MAIN ----------------------
 
 async def main():
     if not QUIET_LOGGING:
