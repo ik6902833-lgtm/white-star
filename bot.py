@@ -108,7 +108,8 @@ CREATE TABLE IF NOT EXISTS withdrawals (
     to_username TEXT,
     status TEXT DEFAULT 'pending',
     created_at TEXT,
-    user_msg_id INTEGER
+    user_msg_id INTEGER,
+    admin_msg_id INTEGER
 )
 """)
 
@@ -164,6 +165,13 @@ except Exception:
 # Новый столбец: cis_ok (1 — СНГ, 0 — не СНГ)
 try:
     cursor.execute("ALTER TABLE users ADD COLUMN cis_ok INTEGER DEFAULT 1")
+    conn.commit()
+except Exception:
+    pass
+
+# Новый столбец: admin_msg_id для заявок на вывод (для старых баз)
+try:
+    cursor.execute("ALTER TABLE withdrawals ADD COLUMN admin_msg_id INTEGER")
     conn.commit()
 except Exception:
     pass
@@ -370,11 +378,55 @@ async def unban_in_required_channels(target_user_id: int):
 
 
 async def block_user_everywhere(target_user_id: int):
+    """
+    Блокировка пользователя:
+    - blocked=1
+    - обнуление баланса/рефералов/заработка
+    - удаление всех PENDING-заявок на вывод из БД
+    - удаление сообщений-заявок в CHANNEL_FOR_WITHDRAW
+    - бан во всех обязательных каналах
+    """
+    # Сначала достанем pending-заявки и удалим их сообщения в канале вывода
+    pending_rows = []
     try:
-        cursor.execute("UPDATE users SET blocked=1 WHERE user_id=?", (target_user_id,))
+        cursor.execute(
+            "SELECT id, admin_msg_id FROM withdrawals WHERE user_id=? AND status='pending'",
+            (target_user_id,)
+        )
+        pending_rows = cursor.fetchall() or []
+    except Exception as e:
+        _qwarn(f"[WARN] fetch pending withdrawals in block_user_everywhere failed: {type(e).__name__}")
+
+    for wid, admin_msg_id in pending_rows:
+        if admin_msg_id:
+            try:
+                await bot.delete_message(CHANNEL_FOR_WITHDRAW, admin_msg_id)
+            except Exception:
+                # даже если не получилось удалить — идём дальше
+                pass
+
+    # Обнуляем профиль и удаляем pending-заявки из БД + реф-таблицу
+    try:
+        cursor.execute("""
+            UPDATE users
+            SET blocked=1,
+                balance=0,
+                referrals_count=0,
+                total_earned=0
+            WHERE user_id=?
+        """, (target_user_id,))
+        cursor.execute(
+            "DELETE FROM withdrawals WHERE user_id=? AND status='pending'",
+            (target_user_id,)
+        )
+        cursor.execute(
+            "DELETE FROM referral_rewards WHERE referrer_id=? OR referred_id=?",
+            (target_user_id, target_user_id)
+        )
         conn.commit()
     except Exception as e:
         _qwarn(f"[WARN] DB block_user_everywhere failed: {type(e).__name__}")
+
     await ban_in_required_channels(target_user_id)
 
 
@@ -880,6 +932,7 @@ async def cmd_broadcast(message: types.Message):
 async def cmd_myid(message: types.Message):
     await safe_answer_message(message, f"🆔 Твой user_id: {message.from_user.id}")
 
+
 @dp.message(Command("recheck_cis"))
 async def cmd_recheck_cis(message: types.Message):
     """
@@ -932,8 +985,6 @@ async def cmd_recheck_cis(message: types.Message):
         f"✅ Проверка завершена.\nВсего в базе (не заблокированных): {total}\nПроверено по языку: {checked}\nАвтоматически заблокировано: {blocked}",
         reply_markup=admin_menu_kb(),
     )
-
-
 
 
 @dp.message(lambda m: m.from_user.id in admin_login_states)
@@ -1029,7 +1080,6 @@ async def ensure_cis_access(user_id: int, carrier) -> bool:
 
 
 # ---------------------- /start ----------------------
-
 
 
 @dp.message(CommandStart())
@@ -1564,7 +1614,7 @@ async def main_menu_handler(message: types.Message):
             user_states[user_id] = {"stage": "awaiting_confirm_amount", "pending_amount": amount}
             await safe_answer_message(
                 message,
-                "⚠️ <b>ВАЖНО!</b> Перед подачей заявки на вывод необходимо отписать администратору @aaR1ss\n\n"
+                "⚠️ <b>ВАЖНО!</b> Перед подачей заявки на вывод необходимо отписать администратору @pozy_69\n\n"
                 "<b>Без этого ваша заявка не будет обработана и выведена!</b>",
                 reply_markup=withdraw_amount_confirm_kb(user_id, amount),
                 parse_mode="HTML"
@@ -1577,7 +1627,7 @@ async def main_menu_handler(message: types.Message):
                 await safe_answer_message(
                     message,
                     "🗣 <b>Укажите свой юзернейм через @</b>\n\n"
-                    "<b>Например: @aaR1ss</b>",
+                    "<b>Например: @pozy_69</b>",
                     reply_markup=back_keyboard(),
                     parse_mode="HTML"
                 )
@@ -1866,7 +1916,7 @@ async def withdraw_confirm_handlers(callback: types.CallbackQuery):
             pass
         await safe_send_message(
             user_id,
-            "🗣 <b>Укажите свой юзернейм через @</b>\n\n<b>Например: @aaR1ss</b>",
+            "🗣 <b>Укажите свой юзернейм через @</b>\n\n<b>Например: @pozy_69</b>",
             reply_markup=back_keyboard(),
             parse_mode="HTML"
         )
@@ -1919,10 +1969,19 @@ async def withdraw_confirm_handlers(callback: types.CallbackQuery):
                       f"Сумма: {amount} ⭐️\n"
                       f"Кому: {to_username}\n"
                       f"Время: {now_kyiv().isoformat()}")
+        admin_msg = None
         try:
-            await bot.send_message(CHANNEL_FOR_WITHDRAW, admin_text, reply_markup=kb_admin)
+            admin_msg = await bot.send_message(CHANNEL_FOR_WITHDRAW, admin_text, reply_markup=kb_admin)
         except Exception as e:
             _qwarn(f"[WARN] send to CHANNEL_FOR_WITHDRAW failed: {type(e).__name__}")
+
+        # Сохраняем message_id заявки в ТГК, чтобы потом можно было удалить при блокировке
+        try:
+            if admin_msg and hasattr(admin_msg, "message_id"):
+                cursor.execute("UPDATE withdrawals SET admin_msg_id=? WHERE id=?", (admin_msg.message_id, withdraw_id))
+                conn.commit()
+        except Exception as e:
+            _qwarn(f"[WARN] store admin_msg_id failed: {type(e).__name__}")
 
         try:
             await callback.message.delete()
@@ -1965,7 +2024,7 @@ async def withdraw_confirm_handlers(callback: types.CallbackQuery):
             pass
         await safe_send_message(
             user_id,
-            "🗣 <b>Укажите свой юзернейм через @</b>\n\n<b>Например: @aaR1ss</b>",
+            "🗣 <b>Укажите свой юзернейм через @</b>\n\n<b>Например: @pozy_69</b>",
             reply_markup=back_keyboard(),
             parse_mode="HTML"
         )
