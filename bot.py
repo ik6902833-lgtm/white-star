@@ -108,8 +108,7 @@ CREATE TABLE IF NOT EXISTS withdrawals (
     to_username TEXT,
     status TEXT DEFAULT 'pending',
     created_at TEXT,
-    user_msg_id INTEGER,
-    admin_msg_id INTEGER
+    user_msg_id INTEGER
 )
 """)
 
@@ -169,7 +168,7 @@ try:
 except Exception:
     pass
 
-# Новый столбец: admin_msg_id для заявок на вывод (для старых баз)
+# Новый столбец: admin_msg_id для хранения id сообщения в ТГК с заявкой на вывод
 try:
     cursor.execute("ALTER TABLE withdrawals ADD COLUMN admin_msg_id INTEGER")
     conn.commit()
@@ -352,7 +351,7 @@ async def resolve_username_display(user_id: int) -> str:
         return "—"
 
 
-# ========= Блокировка/разблокировка везде (бот + каналы) =========
+# ========= Блокировка/разблокировка везде (бот + каналы + заявки) =========
 
 async def ban_in_required_channels(target_user_id: int):
     for open_link, check_target in SPONSORS_REQUIRED:
@@ -380,49 +379,40 @@ async def unban_in_required_channels(target_user_id: int):
 async def block_user_everywhere(target_user_id: int):
     """
     Блокировка пользователя:
-    - blocked=1
-    - обнуление баланса/рефералов/заработка
-    - удаление всех PENDING-заявок на вывод из БД
-    - удаление сообщений-заявок в CHANNEL_FOR_WITHDRAW
-    - бан во всех обязательных каналах
+    - пометить blocked=1;
+    - обнулить профиль (баланс, рефералы, заработано);
+    - удалить все его заявки из базы;
+    - удалить сообщения с заявками в ТГК (CHANNEL_FOR_WITHDRAW);
+    - заблокировать в спонсорских каналах.
     """
-    # Сначала достанем pending-заявки и удалим их сообщения в канале вывода
-    pending_rows = []
     try:
+        # забрать все его заявки, чтобы удалить сообщения в ТГК
+        cursor.execute("SELECT id, admin_msg_id FROM withdrawals WHERE user_id=?", (target_user_id,))
+        rows = cursor.fetchall() or []
+
+        for wid, admin_msg_id in rows:
+            if admin_msg_id:
+                try:
+                    await bot.delete_message(CHANNEL_FOR_WITHDRAW, admin_msg_id)
+                except Exception:
+                    # если сообщение уже удалено или нет прав — просто игнор
+                    pass
+
+        # удалить сами заявки из базы
+        cursor.execute("DELETE FROM withdrawals WHERE user_id=?", (target_user_id,))
+
+        # обнулить профиль: баланс, рефералы, заработок
         cursor.execute(
-            "SELECT id, admin_msg_id FROM withdrawals WHERE user_id=? AND status='pending'",
+            "UPDATE users SET balance=0, referrals_count=0, total_earned=0 WHERE user_id=?",
             (target_user_id,)
         )
-        pending_rows = cursor.fetchall() or []
-    except Exception as e:
-        _qwarn(f"[WARN] fetch pending withdrawals in block_user_everywhere failed: {type(e).__name__}")
 
-    for wid, admin_msg_id in pending_rows:
-        if admin_msg_id:
-            try:
-                await bot.delete_message(CHANNEL_FOR_WITHDRAW, admin_msg_id)
-            except Exception:
-                # даже если не получилось удалить — идём дальше
-                pass
+        # удалить реферальные связи (и как реферер, и как приглашённый)
+        cursor.execute("DELETE FROM referral_rewards WHERE referrer_id=? OR referred_id=?", (target_user_id, target_user_id))
 
-    # Обнуляем профиль и удаляем pending-заявки из БД + реф-таблицу
-    try:
-        cursor.execute("""
-            UPDATE users
-            SET blocked=1,
-                balance=0,
-                referrals_count=0,
-                total_earned=0
-            WHERE user_id=?
-        """, (target_user_id,))
-        cursor.execute(
-            "DELETE FROM withdrawals WHERE user_id=? AND status='pending'",
-            (target_user_id,)
-        )
-        cursor.execute(
-            "DELETE FROM referral_rewards WHERE referrer_id=? OR referred_id=?",
-            (target_user_id, target_user_id)
-        )
+        # пометить как заблокированного
+        cursor.execute("UPDATE users SET blocked=1 WHERE user_id=?", (target_user_id,))
+
         conn.commit()
     except Exception as e:
         _qwarn(f"[WARN] DB block_user_everywhere failed: {type(e).__name__}")
@@ -1264,6 +1254,7 @@ async def ensure_subscribed(user_id: int, carrier, skip_subgram: bool = False) -
         if user and chat_id:
             kb = InlineKeyboardMarkup(
                 inline_keyboard=[[
+
                     InlineKeyboardButton(text="Муж👨", callback_data="gender_male"),
                     InlineKeyboardButton(text="Жен👩", callback_data="gender_female"),
                 ]]
@@ -1657,6 +1648,7 @@ async def main_menu_handler(message: types.Message):
 
     if text in menu_buttons:
         cursor.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
+
         row = cursor.fetchone()
         if not row:
             await safe_answer_message(message, "Сначала начните работу с ботом через /start")
@@ -1854,7 +1846,7 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
         target_id = state.get("target_id")
         if not target_id:
             admin_actions.pop(uid, None)
-            await safe_answer_message(message, "⚠️ Ошибка контекста. Начните заново.", reply_markup=admin_menu_kb())
+            await safe_answer_message(message, "⚠️ Ошибка контекста. Начните заново.", reply_markup=admin_menu_kk())
             return True
 
         cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (amount, target_id))
@@ -1886,6 +1878,7 @@ async def withdraw_confirm_handlers(callback: types.CallbackQuery):
         return
 
     data = callback.data
+    admin_msg_id = None  # сюда сохраним id сообщения в ТГК с заявкой
 
     if data == "withdraw_back":
         user_states.pop(user_id, None)
@@ -1969,19 +1962,12 @@ async def withdraw_confirm_handlers(callback: types.CallbackQuery):
                       f"Сумма: {amount} ⭐️\n"
                       f"Кому: {to_username}\n"
                       f"Время: {now_kyiv().isoformat()}")
-        admin_msg = None
         try:
             admin_msg = await bot.send_message(CHANNEL_FOR_WITHDRAW, admin_text, reply_markup=kb_admin)
+            if admin_msg and hasattr(admin_msg, "message_id"):
+                admin_msg_id = admin_msg.message_id
         except Exception as e:
             _qwarn(f"[WARN] send to CHANNEL_FOR_WITHDRAW failed: {type(e).__name__}")
-
-        # Сохраняем message_id заявки в ТГК, чтобы потом можно было удалить при блокировке
-        try:
-            if admin_msg and hasattr(admin_msg, "message_id"):
-                cursor.execute("UPDATE withdrawals SET admin_msg_id=? WHERE id=?", (admin_msg.message_id, withdraw_id))
-                conn.commit()
-        except Exception as e:
-            _qwarn(f"[WARN] store admin_msg_id failed: {type(e).__name__}")
 
         try:
             await callback.message.delete()
@@ -1996,10 +1982,10 @@ async def withdraw_confirm_handlers(callback: types.CallbackQuery):
         )
         try:
             if msg and hasattr(msg, "message_id"):
-                cursor.execute("UPDATE withdrawals SET user_msg_id=? WHERE id=?", (msg.message_id, withdraw_id))
+                cursor.execute("UPDATE withdrawals SET user_msg_id=?, admin_msg_id=? WHERE id=?", (msg.message_id, admin_msg_id, withdraw_id))
                 conn.commit()
         except Exception as e:
-            _qwarn(f"[WARN] store user_msg_id failed: {type(e).__name__}")
+            _qwarn(f"[WARN] store user_msg_id/admin_msg_id failed: {type(e).__name__}")
 
         user_states.pop(user_id, None)
         await callback.answer()
