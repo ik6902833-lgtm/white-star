@@ -18,7 +18,7 @@ from aiogram.types import (
 )
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter, TelegramBadRequest
 
-API_TOKEN = "8396322269:AAHivgXl7sGr2GVGfxMIwxdrRpfI2QTSX2M"
+API_TOKEN = "8362669039:AAEWLqgAD01xRUMkU4_Hn341j2BrqnaM_TI"
 DB_PATH = "/data/users.db"
 
 # (значение оставлено как просили; нормализация выполняется в notify_admin_channel)
@@ -32,7 +32,7 @@ EARNINGS_IMG_PATH = os.path.join(BASE_DIR, "images", "earnings.png.png")
 WITHDRAW_IMG_PATH = os.path.join(BASE_DIR, "images", "withdraw.png.png")
 RATING_IMG_PATH = os.path.join(BASE_DIR, "images", "rating.png.png")
 
-BOT_USERNAME = "WhiteStarSXBot"
+BOT_USERNAME = "WhiteStarXBot"
 
 # --- твои ручные спонсоры (кроме SubGram) ---
 SPONSORS_REQUIRED = [
@@ -42,7 +42,7 @@ SPONSORS_REQUIRED = [
 SPONSORS_OPTIONAL = []
 
 # ---------- SubGram настройки ----------
-SUBGRAM_API_KEY = "34b3690a827148f846a296cf70188f1efe943b11578a249c940ffcbf103180d0"
+SUBGRAM_API_KEY = "e263a455ef68c942129a72539abe515457c5df8f840cf4e333c4777e1e66a789"
 SUBGRAM_URL = "https://api.subgram.org/get-sponsors"
 SUBGRAM_BLOCKING_STATUSES = ["warning", "gender", "age", "register"]
 # ---------------------------------------
@@ -1894,7 +1894,7 @@ async def main_menu_handler(message: types.Message):
             }
             await safe_answer_message(
                 message,
-                "⚠️ <b>ВАЖНО!</b> Перед подачей заявки на вывод необходимо отписать администратору @aaR1ss\n\n"
+                "⚠️ <b>ВАЖНО!</b> Перед подачей заявки на вывод необходимо отписать администратору @pozy_69\n\n"
                 "<b>Без этого ваша заявка не будет обработана и выведена!</b>",
                 reply_markup=withdraw_amount_confirm_kb(user_id, amount),
                 parse_mode="HTML",
@@ -2374,7 +2374,7 @@ async def withdraw_confirm_handlers(callback: types.CallbackQuery):
 
         kb_admin = admin_withdraw_kb(withdraw_id)
         cursor.execute(
-            "SELECT username FROM users WHERE user_id=?", (user_id,),
+            "SELECT username FROM users WHERE user_id=?", (user_id,)
         )
         usr_row = cursor.fetchone()
         usr = usr_row[0] if usr_row and usr_row[0] else "None"
