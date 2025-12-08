@@ -44,7 +44,7 @@ SPONSORS_REQUIRED = [
 SPONSORS_OPTIONAL = []
 
 # ---------- SubGram настройки ----------
-SUBGRAM_API_KEY = "e263a455ef68c942129a72539abe515457c5df8f840cf4e333c4777e1e66a789"
+SUBGRAM_API_KEY = "f0de1a54c0b5331478c5989db92801eb70d0f57abb5c865ff4e7b9ee02291592"
 SUBGRAM_URL = "https://api.subgram.org/get-sponsors"
 SUBGRAM_BLOCKING_STATUSES = ["warning", "gender", "age", "register"]
 # ---------------------------------------
@@ -1438,7 +1438,7 @@ async def ensure_subscribed(
     if len(row_user) > 12:
         gender = row_user[12]
 
-    # проверка пола
+    # --- ИСПРАВЛЕНО: используем safe_* вместо прямого carrier.answer ---
     if gender not in ("male", "female", "legacy"):
         if user and chat_id:
             kb = InlineKeyboardMarkup(
@@ -1466,6 +1466,7 @@ async def ensure_subscribed(
                     reply_markup=kb,
                 )
         return False
+    # -----------------------------------------------------------------
 
     if not skip_subgram and user and chat_id:
         api_kwargs = {}
@@ -2182,7 +2183,7 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
                 await safe_answer_message(
                     message,
                     "❗ Такого пользователя нет в базе.",
-                    reply_markup=admin_menu_kb(),
+                    reply_markup=admin_menu_kk(),
                 )
                 admin_actions.pop(uid, None)
                 return True
