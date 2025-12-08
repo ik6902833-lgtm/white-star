@@ -18,7 +18,9 @@ from aiogram.types import (
 )
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter, TelegramBadRequest
 
+# !!! НОВЫЙ ТОКЕН БОТА !!!
 API_TOKEN = "8288726220:AAG4VzWSppigMMJqshBi7u0VmjkrhrBhdGY"
+
 DB_PATH = "/data/users.db"
 
 # (значение оставлено как просили; нормализация выполняется в notify_admin_channel)
@@ -1436,6 +1438,7 @@ async def ensure_subscribed(
     if len(row_user) > 12:
         gender = row_user[12]
 
+    # --- ИСПРАВЛЕНО: используем safe_* вместо прямого carrier.answer ---
     if gender not in ("male", "female", "legacy"):
         if user and chat_id:
             kb = InlineKeyboardMarkup(
@@ -1451,12 +1454,19 @@ async def ensure_subscribed(
                 ]
             )
             if isinstance(carrier, types.Message):
-                await carrier.answer("Выберите ваш пол", reply_markup=kb)
+                await safe_answer_message(
+                    carrier,
+                    "Выберите ваш пол",
+                    reply_markup=kb,
+                )
             elif isinstance(carrier, types.CallbackQuery):
-                await carrier.message.answer(
-                    "Выберите ваш пол", reply_markup=kb
+                await safe_send_message(
+                    chat_id,
+                    "Выберите ваш пол",
+                    reply_markup=kb,
                 )
         return False
+    # -----------------------------------------------------------------
 
     if not skip_subgram and user and chat_id:
         api_kwargs = {}
@@ -2084,7 +2094,7 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
             await safe_answer_message(
                 message,
                 "✅ Сообщение получено.\n\nНапишите «да» для подтверждения рассылки всем пользователям в базе, либо «отмена».",
-                reply_markup=admin_menu_kb(),
+                reply_markup=admin_menu_kk(),
             )
             return True
 
@@ -2102,7 +2112,7 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
                 await safe_answer_message(
                     message,
                     "Не понял. Напишите «да» для запуска рассылки или «отмена».",
-                    reply_markup=admin_menu_kb(),
+                    reply_markup=admin_menu_kб(),
                 )
                 return True
 
