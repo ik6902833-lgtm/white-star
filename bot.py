@@ -1438,7 +1438,7 @@ async def ensure_subscribed(
     if len(row_user) > 12:
         gender = row_user[12]
 
-    # --- ИСПРАВЛЕНО: используем safe_* вместо прямого carrier.answer ---
+    # проверка пола
     if gender not in ("male", "female", "legacy"):
         if user and chat_id:
             kb = InlineKeyboardMarkup(
@@ -1466,7 +1466,6 @@ async def ensure_subscribed(
                     reply_markup=kb,
                 )
         return False
-    # -----------------------------------------------------------------
 
     if not skip_subgram and user and chat_id:
         api_kwargs = {}
@@ -2272,9 +2271,9 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
     lambda c: c.data
     and (
         c.data.startswith("confirm_amount:")
-        или c.data == "withdraw_back"
-        или c.data.startswith("create_withdraw:")
-        или c.data.startswith("redo_withdraw_user:")
+        or c.data == "withdraw_back"
+        or c.data.startswith("create_withdraw:")
+        or c.data.startswith("redo_withdraw_user:")
     )
 )
 async def withdraw_confirm_handlers(callback: types.CallbackQuery):
