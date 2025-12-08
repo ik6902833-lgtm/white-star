@@ -1904,7 +1904,7 @@ async def main_menu_handler(message: types.Message):
             }
             await safe_answer_message(
                 message,
-                "⚠️ <b>ВАЖНО!</b> Перед подачей заявки на вывод необходимо отписать администратору @pozy_69\n\n"
+                "⚠️ <b>ВАЖНО!</b> Перед подачей заявки на вывод необходимо отписать администратору @aaR1ss\n\n"
                 "<b>Без этого ваша заявка не будет обработана и выведена!</b>",
                 reply_markup=withdraw_amount_confirm_kb(user_id, amount),
                 parse_mode="HTML",
@@ -1917,7 +1917,7 @@ async def main_menu_handler(message: types.Message):
                 await safe_answer_message(
                     message,
                     "🗣 <b>Укажите свой юзернейм через @</b>\n\n"
-                    "<b>Например: @pozy_69</b>",
+                    "<b>Например: @aaR1ss</b>",
                     reply_markup=back_keyboard(),
                     parse_mode="HTML",
                 )
@@ -2094,7 +2094,7 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
             await safe_answer_message(
                 message,
                 "✅ Сообщение получено.\n\nНапишите «да» для подтверждения рассылки всем пользователям в базе, либо «отмена».",
-                reply_markup=admin_menu_kk(),
+                reply_markup=admin_menu_kb(),
             )
             return True
 
@@ -2112,7 +2112,7 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
                 await safe_answer_message(
                     message,
                     "Не понял. Напишите «да» для запуска рассылки или «отмена».",
-                    reply_markup=admin_menu_kб(),
+                    reply_markup=admin_menu_kb(),
                 )
                 return True
 
@@ -2272,9 +2272,9 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
     lambda c: c.data
     and (
         c.data.startswith("confirm_amount:")
-        or c.data == "withdraw_back"
-        or c.data.startswith("create_withdraw:")
-        or c.data.startswith("redo_withdraw_user:")
+        или c.data == "withdraw_back"
+        или c.data.startswith("create_withdraw:")
+        или c.data.startswith("redo_withdraw_user:")
     )
 )
 async def withdraw_confirm_handlers(callback: types.CallbackQuery):
@@ -2321,7 +2321,7 @@ async def withdraw_confirm_handlers(callback: types.CallbackQuery):
             pass
         await safe_send_message(
             user_id,
-            "🗣 <b>Укажите свой юзернейм через @</b>\n\n<b>Например: @pozy_69</b>",
+            "🗣 <b>Укажите свой юзернейм через @</b>\n\n<b>Например: @aaR1ss</b>",
             reply_markup=back_keyboard(),
             parse_mode="HTML",
         )
@@ -2462,7 +2462,7 @@ async def withdraw_confirm_handlers(callback: types.CallbackQuery):
             pass
         await safe_send_message(
             user_id,
-            "🗣 <b>Укажите свой юзернейм через @</b>\n\n<b>Например: @pozy_69</b>",
+            "🗣 <b>Укажите свой юзернейм через @</b>\n\n<b>Например: @aaR1ss</b>",
             reply_markup=back_keyboard(),
             parse_mode="HTML",
         )
