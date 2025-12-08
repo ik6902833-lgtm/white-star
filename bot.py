@@ -18,7 +18,7 @@ from aiogram.types import (
 )
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter, TelegramBadRequest
 
-API_TOKEN = "8362669039:AAEWLqgAD01xRUMkU4_Hn341j2BrqnaM_TI"
+API_TOKEN = "8288726220:AAG4VzWSppigMMJqshBi7u0VmjkrhrBhdGY"
 DB_PATH = "/data/users.db"
 
 # (значение оставлено как просили; нормализация выполняется в notify_admin_channel)
@@ -2374,7 +2374,7 @@ async def withdraw_confirm_handlers(callback: types.CallbackQuery):
 
         kb_admin = admin_withdraw_kb(withdraw_id)
         cursor.execute(
-            "SELECT username FROM users WHERE user_id=?", (user_id,)
+            "SELECT username FROM users WHERE user_id=?", (user_id,),
         )
         usr_row = cursor.fetchone()
         usr = usr_row[0] if usr_row and usr_row[0] else "None"
