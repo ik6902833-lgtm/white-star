@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 import aiohttp  # SubGram
 import logging  # для логов при необходимости
+import difflib  # для сравнения похожести имён/юзернеймов
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command, CommandStart
@@ -18,7 +19,7 @@ from aiogram.types import (
 )
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter, TelegramBadRequest
 
-# !!! НОВЫЙ ТОКЕН БОТА !!!
+# !!! ТОКЕН БОТА !!!
 API_TOKEN = "8288726220:AAG4VzWSppigMMJqshBi7u0VmjkrhrBhdGY"
 
 DB_PATH = "/data/users.db"
@@ -53,6 +54,7 @@ REFERRAL_REWARD = 4
 REFERRAL_BONUS_EVERY = 10
 REFERRAL_BONUS_AMOUNT = 10
 
+# граница «новых» аккаунтов по user_id
 YOUNG_ACCOUNT_THRESHOLD = 7_500_000_000
 
 CHANNEL_FOR_WITHDRAW = -1003003114178
@@ -211,6 +213,19 @@ CIS_PHONE_PREFIXES = (
     "+995",
     "+993",
 )
+
+CIS_LANG_CODES = {
+    "ru",
+    "uk",
+    "be",
+    "kk",
+    "ky",
+    "uz",
+    "tg",
+    "az",
+    "hy",
+    "ro",
+}
 
 
 def _qwarn(msg: str):
@@ -968,6 +983,7 @@ def admin_menu_kb() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="⚙️ Изменить награду за реферала")],
             [KeyboardButton(text="📢 Рассылка")],
             [KeyboardButton(text="📈 Статистика пользователей")],
+            [KeyboardButton(text="🕵️ Проверка риска")],
             [KeyboardButton(text="🚪 Выйти из админки")],
         ],
         resize_keyboard=True,
@@ -1105,7 +1121,7 @@ async def cmd_recheck_cis(message: types.Message):
 
     await safe_answer_message(
         message,
-        "⏳ Запускаю проверку пользователей по языку Telegram...",
+        "⏳ Запускаю проверку пользователей по языку Telegram (СНГ)...",
         reply_markup=admin_menu_kb(),
     )
 
@@ -1152,48 +1168,11 @@ async def cmd_recheck_cis(message: types.Message):
     )
 
 
-@dp.message(lambda m: m.from_user.id in admin_login_states)
-async def admin_password_handler(message: types.Message):
-    user_id = message.from_user.id
-    text = (message.text or "").strip()
-    admin_login_states.discard(user_id)
-
-    if text == ADMIN_PASSWORD:
-        admin_sessions.add(user_id)
-        await safe_answer_message(
-            message,
-            "✅ Доступ разрешён. Вы в админ-панели.\n\n"
-            "Доступные действия:\n"
-            "🔄 Обнулить пользователя — кнопка или /restartpikslip <user_id>\n"
-            "🚫 Заблокировать / Разблокировать — кнопка или /bensplip <user_id>\n"
-            "💳 Начислить звезды — кнопка\n"
-            "⚙️ Изменить награду за реферала — кнопка\n"
-            "📢 Рассылка — кнопка или /broadcast\n"
-            "📈 Статистика пользователей — кнопка\n"
-            "🚪 Выйти из админки — кнопка или /exitadmin",
-            reply_markup=admin_menu_kb(),
-        )
-    else:
-        await safe_answer_message(
-            message, "❌ Неверный пароль. Вход в админ-панель отклонён."
-        )
-
-
-CIS_LANG_CODES = {
-    "ru",
-    "uk",
-    "be",
-    "kk",
-    "ky",
-    "uz",
-    "tg",
-    "az",
-    "hy",
-    "ro",
-}
-
-
 async def ensure_cis_access(user_id: int, carrier) -> bool:
+    """
+    Основная проверка на СНГ: по language_code.
+    Если язык не СНГ — блокируем и пишем сообщение.
+    """
     user: types.User | None = None
     chat_id: int | None = None
 
@@ -1438,7 +1417,6 @@ async def ensure_subscribed(
     if len(row_user) > 12:
         gender = row_user[12]
 
-    # --- ИСПРАВЛЕНО: используем safe_* вместо прямого carrier.answer ---
     if gender not in ("male", "female", "legacy"):
         if user and chat_id:
             kb = InlineKeyboardMarkup(
@@ -1466,7 +1444,6 @@ async def ensure_subscribed(
                     reply_markup=kb,
                 )
         return False
-    # -----------------------------------------------------------------
 
     if not skip_subgram and user and chat_id:
         api_kwargs = {}
@@ -1691,6 +1668,183 @@ async def subgram_callbacks(callback: types.CallbackQuery):
         )
 
 
+# ---------- АНТИФРОД: ОТЧЁТ ПО РИСКАМ ДЛЯ АДМИНА ----------
+
+async def build_risk_report(target_user_id: int) -> str:
+    """
+    Возвращает текстовый отчёт по рискам:
+    - СНГ / не СНГ
+    - наличие аватарки
+    - «старый/новый» аккаунт по user_id
+    - похожесть на пригласившего (по имени/юзернейму)
+    """
+    # данные из БД
+    cursor.execute(
+        "SELECT user_id, username, created_at, referrer_id, phone FROM users WHERE user_id=?",
+        (target_user_id,),
+    )
+    row = cursor.fetchone()
+    db_user_id = None
+    db_username = None
+    created_at = None
+    referrer_id = None
+    phone = None
+
+    if row:
+        db_user_id = row[0]
+        db_username = row[1]
+        created_at = row[2]
+        referrer_id = row[3]
+        phone = row[4]
+
+    # данные из Telegram
+    chat = None
+    try:
+        chat = await bot.get_chat(target_user_id)
+    except Exception:
+        pass
+
+    # язык / СНГ
+    lang_code = None
+    is_cis_lang = None
+    if chat:
+        lang_code = getattr(chat, "language_code", None)
+        if lang_code:
+            base_lang = lang_code.split("-")[0].lower()
+            is_cis_lang = base_lang in CIS_LANG_CODES
+
+    # телефон / СНГ (если ты когда-то его сохраняешь)
+    is_cis_phone = None
+    if phone:
+        is_cis_phone = any(str(phone).startswith(p) for p in CIS_PHONE_PREFIXES)
+
+    # итог СНГ
+    if is_cis_lang is None and is_cis_phone is None:
+        cis_text = "неизвестно"
+        cis_flag = "⚪️"
+    else:
+        cis_ok = (is_cis_lang is True) or (is_cis_phone is True)
+        cis_text = "СНГ" if cis_ok else "НЕ СНГ"
+        cis_flag = "✅" if cis_ok else "❌"
+
+    # аватарка
+    has_avatar = None
+    try:
+        photos = await bot.get_user_profile_photos(target_user_id, limit=1)
+        has_avatar = photos.total_count > 0
+    except Exception:
+        pass
+    if has_avatar is None:
+        avatar_text = "неизвестно"
+        avatar_flag = "⚪️"
+    else:
+        avatar_flag = "✅" if has_avatar else "❌"
+        avatar_text = "есть" if has_avatar else "нет"
+
+    # новый / старый аккаунт по user_id
+    is_young = target_user_id > YOUNG_ACCOUNT_THRESHOLD
+    young_flag = "🆕" if is_young else "📦"
+    young_text = "новый (по user_id)" if is_young else "старый (по user_id)"
+
+    # возраст в боте (по created_at в БД)
+    age_text = "нет данных"
+    if created_at:
+        try:
+            dt = datetime.fromisoformat(created_at)
+            days = (now_kyiv() - dt).days
+            age_text = f"{days} дн. в боте"
+        except Exception:
+            age_text = created_at
+
+    # похожесть на пригласившего
+    similarity = None
+    ref_info_text = "нет реферера"
+    if referrer_id:
+        ref_info_text = f"ID: {referrer_id}"
+        ref_chat = None
+        try:
+            ref_chat = await bot.get_chat(referrer_id)
+        except Exception:
+            pass
+
+        def build_name(c: types.Chat | None, uname: str | None) -> str:
+            parts = []
+            if c:
+                if getattr(c, "first_name", None):
+                    parts.append(c.first_name)
+                if getattr(c, "last_name", None):
+                    parts.append(c.last_name)
+                if getattr(c, "username", None):
+                    parts.append(c.username)
+            if uname and uname not in parts:
+                parts.append(uname)
+            return " ".join(parts).strip().lower()
+
+        name_user = build_name(chat, db_username)
+        uname_ref = None
+        cursor.execute("SELECT username FROM users WHERE user_id=?", (referrer_id,))
+        rr = cursor.fetchone()
+        if rr and rr[0]:
+            uname_ref = rr[0]
+        name_ref = build_name(ref_chat, uname_ref)
+
+        if name_user and name_ref:
+            similarity = difflib.SequenceMatcher(
+                None, name_user, name_ref
+            ).ratio()
+
+    if similarity is None:
+        sim_text = "нет данных"
+    else:
+        sim_text = f"{similarity:.2f}"
+
+    # считаем риск (чем больше score, тем хуже)
+    score = 0
+    if is_cis_lang is False or is_cis_phone is False:
+        score += 2
+    if has_avatar is False:
+        score += 1
+    if is_young:
+        score += 1
+    if similarity is not None and similarity > 0.80:
+        score += 2
+
+    if score <= 1:
+        risk_level = "низкий"
+        recommendation = "Можно выплачивать, но всё равно смотри по ситуации."
+    elif score <= 3:
+        risk_level = "средний"
+        recommendation = "Лучше вручную проверить активность, историю, переписку перед выплатой."
+    else:
+        risk_level = "высокий"
+        recommendation = "Я бы не выплачивал без очень хороших доказательств, что юзер живой."
+
+    # имя юзера для красивого вывода
+    pretty_name = ""
+    if chat:
+        pretty_name = f"{chat.first_name or ''} {chat.last_name or ''}".strip()
+    if not pretty_name:
+        pretty_name = db_username or (chat.username if chat and chat.username else str(target_user_id))
+
+    report = (
+        f"🕵️ <b>Проверка риска пользователя</b>\n\n"
+        f"👤 <b>{pretty_name}</b> (ID: <code>{target_user_id}</code>)\n"
+        f"@{db_username or (chat.username if chat and chat.username else 'нет')}\n\n"
+        f"{cis_flag} Страна (по языку/телефону): <b>{cis_text}</b>\n"
+        f"{avatar_flag} Аватар: <b>{avatar_text}</b>\n"
+        f"{young_flag} Аккаунт: <b>{young_text}</b>\n"
+        f"⏱ Возраст в боте: <b>{age_text}</b>\n"
+        f"🤝 Реферер: <b>{ref_info_text}</b>\n"
+        f"🔁 Похожесть с реферером: <b>{sim_text}</b>\n\n"
+        f"⚠️ Итоговый риск: <b>{risk_level.upper()}</b>\n"
+        f"💬 Рекомендация: {recommendation}"
+    )
+
+    return report
+
+
+# ---------- ОСНОВНОЙ ХЕНДЛЕР ТЕКСТА / КНОПОК ----------
+
 @dp.message()
 async def main_menu_handler(message: types.Message):
     uid = message.from_user.id
@@ -1732,6 +1886,7 @@ async def main_menu_handler(message: types.Message):
         "⚙️ Изменить награду за реферала",
         "📢 Рассылка",
         "📈 Статистика пользователей",
+        "🕵️ Проверка риска",
     }
     if text in nav_buttons:
         admin_actions.pop(uid, None)
@@ -1851,6 +2006,20 @@ async def main_menu_handler(message: types.Message):
         await safe_answer_message(
             message,
             "💳 Кому начислить звезды? Пришлите @username или user_id.\nНапишите «отмена» для выхода.",
+            reply_markup=admin_menu_kb(),
+        )
+        return
+
+    if text == "🕵️ Проверка риска":
+        if not await has_admin_access(user_id):
+            await safe_answer_message(
+                message, "❌ У вас нет доступа."
+            )
+            return
+        admin_actions[user_id] = {"mode": "risk", "await": "user"}
+        await safe_answer_message(
+            message,
+            "🕵️ Пришлите @username или user_id пользователя, которого нужно проверить.\n«отмена» — чтобы выйти.",
             reply_markup=admin_menu_kb(),
         )
         return
@@ -2139,7 +2308,7 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
         await safe_answer_message(
             message,
             f"✅ Новая награда за реферала установлена: {new_reward}⭐️",
-            reply_markup=admin_menu_kb(),
+            reply_markup=admin_menu_kk(),
         )
         return True
 
@@ -2183,7 +2352,7 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
                 await safe_answer_message(
                     message,
                     "❗ Такого пользователя нет в базе.",
-                    reply_markup=admin_menu_kk(),
+                    reply_markup=admin_menu_kb(),
                 )
                 admin_actions.pop(uid, None)
                 return True
@@ -2210,6 +2379,18 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
                 message,
                 f"💳 Ок. Сколько ⭐️ начислить пользователю {target_id}? Напишите число. («отмена» для выхода)",
                 reply_markup=admin_menu_kb(),
+            )
+            return True
+
+        if mode == "risk":
+            # наш новый режим проверки риска
+            report = await build_risk_report(target_id)
+            admin_actions.pop(uid, None)
+            await safe_answer_message(
+                message,
+                report,
+                reply_markup=admin_menu_kb(),
+                parse_mode="HTML",
             )
             return True
 
