@@ -1,30 +1,22 @@
 services:
+  # 1) Телеграм-бот (работает через long polling)
   - type: worker
-    name: star-bot
+    name: white-star-bot
     env: python
-    region: frankfurt
-    plan: starter
+    plan: free
+    repo: https://github.com/ik6902833-lgtm/white-star
+    branch: main
+    autoDeploy: true
     buildCommand: "pip install -r requirements.txt"
     startCommand: "python bot.py"
-    disk:
-      name: star-disk
-      mountPath: /data
-      sizeGB: 1
-    envVars:
-      - key: API_TOKEN
-        sync: false
-      - key: SUBGRAM_API_KEY
-        sync: false
-      - key: NEW_ADMIN_CHANNEL
-        value: "sdafsadfsdaf13"
-      - key: CHANNEL_FOR_WITHDRAW
-        value: "-1003003114178"
 
+  # 2) Веб-сайт проверки СНГ (FastAPI + Uvicorn)
   - type: web
-    name: cis-webapp
+    name: white-star-cis-check
     env: python
-    region: frankfurt
     plan: free
-    rootDir: cis_webapp
-    buildCommand: "pip install -r requirements.txt"
-    startCommand: "uvicorn main:app --host 0.0.0.0 --port $PORT"
+    repo: https://github.com/ik6902833-lgtm/white-star
+    branch: main
+    autoDeploy: true
+    buildCommand: "pip install -r cis_webapp/requirements.txt"
+    startCommand: "uvicorn cis_webapp.main:app --host 0.0.0.0 --port $PORT"
