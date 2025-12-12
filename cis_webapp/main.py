@@ -1,14 +1,11 @@
 import os
+
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
 app = FastAPI()
 
-
-@app.get("/", response_class=HTMLResponse)
-async def index():
-    # Страница с чёрным фоном и текстом
-    return """
+HTML_PAGE = """
 <!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -18,47 +15,45 @@ async def index():
         body {
             margin: 0;
             padding: 0;
-            background-color: #000000;
+            background: #000000;
             color: #ffffff;
-            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            font-family: system-ui, -apple-system, BlinkMacSystemFont,
+                         "Segoe UI", Roboto, sans-serif;
             display: flex;
+            flex-direction: column;
             align-items: center;
             justify-content: center;
             min-height: 100vh;
             text-align: center;
         }
-        .container {
-            max-width: 480px;
-            padding: 24px;
-        }
         h1 {
-            font-size: 28px;
+            font-size: 32px;
             margin-bottom: 16px;
         }
         p {
-            font-size: 18px;
-            line-height: 1.5;
-            margin: 8px 0;
-        }
-        .ok {
-            font-size: 22px;
-            margin-top: 12px;
+            font-size: 20px;
+            margin: 4px 0;
         }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>Проверка СНГ</h1>
-        <p class="ok">Проверено ✅</p>
-        <p>Перейдите в бота для дальнейших действий.</p>
-    </div>
+    <h1>Проверка СНГ</h1>
+    <p>Проверено ✅</p>
+    <p>Перейдите в бота для дальнейших действий</p>
 </body>
 </html>
-    """
+"""
+
+@app.get("/", response_class=HTMLResponse)
+async def index():
+    # Просто отдаём HTML-страницу
+    return HTML_PAGE
 
 
 if __name__ == "__main__":
-    # Локальный запуск (на своём ПК)
-    port = int(os.environ.get("PORT", 8000))
+    # Локальный запуск (на Render это обычно не используется,
+    # там запускается startCommand из render.yaml)
+    port = int(os.environ.get("PORT", "8000"))
     import uvicorn
+
     uvicorn.run("cis_webapp.main:app", host="0.0.0.0", port=port)
