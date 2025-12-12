@@ -3,11 +3,11 @@ import sqlite3
 import asyncio
 import random
 import time
+import json
 from datetime import datetime, timedelta, timezone
 
 import aiohttp  # SubGram
 import logging  # для логов при необходимости
-import json     # <--- добавили для WebApp-данных
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command, CommandStart
@@ -19,7 +19,7 @@ from aiogram.types import (
 )
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter, TelegramBadRequest
 
-# !!! НОВЫЙ ТОКЕН БОТА !!!
+# !!! ТОКЕН БОТА !!!
 API_TOKEN = "8288726220:AAG4VzWSppigMMJqshBi7u0VmjkrhrBhdGY"
 
 DB_PATH = "/data/users.db"
@@ -65,7 +65,7 @@ BROADCAST_REF_LINK = "https://t.me/+JIE3W3PVNYdjYjM6"
 
 QUIET_LOGGING = False
 
-# URL твоего WebApp-сервиса (после деплоя на Render поменяй на свой домен)
+# 🔗 URL твоего CIS WebApp (Render)
 CIS_WEBAPP_URL = "https://white-star-zf2q.onrender.com"
 
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -1098,62 +1098,132 @@ async def cmd_myid(message: types.Message):
     )
 
 
+# 🔹 ПРОВЕРКА СНГ ТЕПЕРЬ ТОЛЬКО ЧЕРЕЗ САЙТ + cis_ok В БАЗЕ
+
+async def ensure_cis_access(user_id: int, carrier) -> bool:
+    """
+    Логика:
+    - cis_ok = 1  -> всё ок, пускаем
+    - cis_ok = 0  -> не СНГ, блок/стоп
+    - cis_ok IS NULL или другое значение -> ещё не проверен, отправляем на сайт
+    """
+    chat_id = None
+    if isinstance(carrier, types.Message):
+        chat_id = carrier.chat.id
+    elif isinstance(carrier, types.CallbackQuery):
+        chat_id = carrier.message.chat.id
+    else:
+        chat_id = user_id
+
+    cursor.execute("SELECT cis_ok FROM users WHERE user_id=?", (user_id,))
+    row = cursor.fetchone()
+    cis_ok = row[0] if row and row[0] is not None else None
+
+    # Уже подтверждён как СНГ
+    if cis_ok == 1:
+        return True
+
+    # Уже подтверждён как НЕ СНГ
+    if cis_ok == 0:
+        if chat_id is not None:
+            await safe_send_message(
+                chat_id,
+                "🚫 Бот доступен только для пользователей из стран СНГ."
+            )
+        return False
+
+    # cis_ok неизвестен — отправляем на сайт
+    if chat_id is not None:
+        # уникальная ссылка для пользователя
+        url = f"{CIS_WEBAPP_URL}?uid={user_id}"
+
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="✅ Пройти проверку СНГ",
+                        web_app=types.WebAppInfo(url=url),
+                    )
+                ]
+            ]
+        )
+
+        text = (
+            "🇷🇺🇺🇦🇧🇾🇰🇿🇺🇿🇰🇬🇦🇿🇦🇲🇹🇯\n\n"
+            "Перед началом работы нужно быстро подтвердить, что вы из СНГ.\n\n"
+            "1) Нажмите кнопку «✅ Пройти проверку СНГ».\n"
+            "2) На сайте дождитесь надписи «Проверено,перейдите в бота для дальнейших действий».\n"
+            "3) Вернитесь в бот — данные проверки придут автоматически."
+        )
+        await safe_send_message(chat_id, text, reply_markup=kb)
+
+    return False
+
+
 @dp.message(Command("recheck_cis"))
-async def cmd_recheck_cis(message: types.Message):
-    admin_id = message.from_user.id
-    if not await has_admin_access(admin_id):
+async def cmd_recheck_cis_old(message: types.Message):
+    # Оставлен пустым / заглушка, чтобы не ломать,
+    # но проверка по языку убрана по твоему запросу
+    await safe_answer_message(
+        message,
+        "Команда устарела: проверка СНГ теперь делается только через сайт.",
+        reply_markup=admin_menu_kb() if await has_admin_access(message.from_user.id) else None
+    )
+
+
+@dp.message(lambda m: m.web_app_data is not None)
+async def webapp_data_handler(message: types.Message):
+    """
+    Обработчик данных, которые присылает твой сайт (WebApp).
+    Ожидается JSON вида:
+    {"event": "cis_check", "is_cis": true/false, "country": "UA", "uid": 123456}
+    """
+    raw = message.web_app_data.data
+    try:
+        data = json.loads(raw)
+    except Exception:
         await safe_answer_message(
-            message, "❌ У вас нет доступа. Войдите через /arisadminslipjiko."
+            message,
+            "⚠️ Ошибка обработки данных проверки. Попробуйте ещё раз.",
         )
         return
 
-    await safe_answer_message(
-        message,
-        "⏳ Запускаю проверку пользователей по языку Telegram...",
-        reply_markup=admin_menu_kb(),
-    )
+    if data.get("event") != "cis_check":
+        return
 
-    cursor.execute("SELECT user_id FROM users WHERE blocked=0")
-    rows = cursor.fetchall() or []
+    is_cis = bool(data.get("is_cis"))
+    country = data.get("country")
+    uid_from_site = data.get("uid")
 
-    total = len(rows)
-    checked = 0
-    blocked = 0
+    user_id = message.from_user.id  # доверяем Telegram
+    cis_value = 1 if is_cis else 0
 
-    for r in rows:
-        try:
-            uid = int(r[0])
-        except Exception:
-            continue
+    try:
+        cursor.execute(
+            "UPDATE users SET cis_ok=? WHERE user_id=?",
+            (cis_value, user_id),
+        )
+        conn.commit()
+    except Exception as e:
+        _qwarn(f"[WARN] update cis_ok failed: {type(e).__name__}")
+        await safe_answer_message(
+            message, "⚠️ Не удалось сохранить результат проверки. Попробуйте позже."
+        )
+        return
 
-        try:
-            chat = await bot.get_chat(uid)
-            lang = getattr(chat, "language_code", None)
-            if not lang:
-                continue
-            lang = lang.split("-")[0].lower()
-        except Exception:
-            continue
-
-        checked += 1
-        if lang not in CIS_LANG_CODES:
-            try:
-                await block_user_everywhere(uid)
-            except Exception:
-                pass
-            blocked += 1
-
-        if checked % 50 == 0:
-            await asyncio.sleep(0.3)
-
-    await safe_send_message(
-        admin_id,
-        "✅ Проверка завершена.\n"
-        f"Всего в базе (не заблокированных): {total}\n"
-        f"Проверено по языку: {checked}\n"
-        f"Автоматически заблокировано: {blocked}",
-        reply_markup=admin_menu_kb(),
-    )
+    if is_cis:
+        txt = "✅ Проверка успешно пройдена. Вы можете пользоваться ботом."
+        await safe_answer_message(
+            message,
+            txt,
+            reply_markup=main_menu_keyboard(),
+        )
+    else:
+        txt = (
+            "🚫 К сожалению, по данным проверки вы не из стран СНГ.\n"
+            "Бот доступен только для пользователей из СНГ."
+        )
+        await safe_answer_message(message, txt)
 
 
 @dp.message(lambda m: m.from_user.id in admin_login_states)
@@ -1183,288 +1253,6 @@ async def admin_password_handler(message: types.Message):
         )
 
 
-CIS_LANG_CODES = {
-    "ru",
-    "uk",
-    "be",
-    "kk",
-    "ky",
-    "uz",
-    "tg",
-    "az",
-    "hy",
-    "ro",
-}
-
-
-async def ensure_cis_access(user_id: int, carrier) -> bool:
-    """
-    Новая логика:
-    1) Смотрим cis_ok в БД:
-       - 1 -> всё ок, пускаем.
-       - 0 -> уже знаем, что не СНГ -> блок и стоп.
-       - NULL/None -> ещё не проверяли, запускаем проверку.
-    2) Если язык Telegram явно СНГ — сразу cis_ok=1.
-    3) Иначе отправляем WebApp-кнопку на IP-проверку.
-    """
-    chat_id: int | None = None
-    user: types.User | None = None
-
-    if isinstance(carrier, types.Message):
-        user = carrier.from_user
-        chat_id = carrier.chat.id
-    elif isinstance(carrier, types.CallbackQuery):
-        user = carrier.from_user
-        chat_id = carrier.message.chat.id
-    else:
-        try:
-            chat = await bot.get_chat(user_id)
-            user = chat
-            chat_id = user_id
-        except Exception:
-            user = None
-            chat_id = user_id
-
-    # читаем cis_ok
-    cis_ok = None
-    try:
-        cursor.execute("SELECT cis_ok FROM users WHERE user_id=?", (user_id,))
-        row = cursor.fetchone()
-        if row is not None:
-            cis_ok = row[0]
-    except Exception:
-        cis_ok = None
-
-    if cis_ok == 1:
-        return True
-
-    if cis_ok == 0:
-        # уже знаем, что не СНГ
-        if chat_id is not None:
-            await safe_send_message(
-                chat_id, "🚫 Бот доступен только для пользователей из стран СНГ."
-            )
-        return False
-
-    # cis_ok ещё не определён -> быстрая проверка по языку
-    lang = getattr(user, "language_code", None) if user else None
-    if lang:
-        lang = lang.split("-")[0].lower()
-        if lang in CIS_LANG_CODES:
-            try:
-                cursor.execute(
-                    "UPDATE users SET cis_ok=1 WHERE user_id=?", (user_id,)
-                )
-                conn.commit()
-            except Exception:
-                pass
-            return True
-
-    # язык не СНГ или его нет — отправляем WebApp с IP-проверкой
-    if chat_id is not None:
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="Проверить страну 🌍",
-                        web_app=types.WebAppInfo(
-                            url=f"{CIS_WEBAPP_URL}?user_id={user_id}"
-                        ),
-                    )
-                ]
-            ]
-        )
-        await safe_send_message(
-            chat_id,
-            "🌍 Бот доступен только для пользователей из стран СНГ.\n\n"
-            "Нажмите кнопку ниже, чтобы пройти быструю проверку по IP.",
-            reply_markup=kb,
-        )
-
-    return False
-
-
-@dp.message(CommandStart())
-async def start_handler(message: types.Message):
-    user_id = message.from_user.id
-    username = message.from_user.username or "None"
-    join_date = now_kyiv().isoformat()
-
-    cursor.execute("SELECT blocked FROM users WHERE user_id=?", (user_id,))
-    row_block = cursor.fetchone()
-    if row_block and row_block[0] == 1:
-        await safe_answer_message(
-            message, "🚫 Вы заблокированы администратором."
-        )
-        return
-
-    referrer_id = 0
-    if message.text and len(message.text.split()) > 1:
-        try:
-            referrer_id = int(message.text.split()[1])
-        except Exception:
-            referrer_id = 0
-    if referrer_id == user_id:
-        referrer_id = 0
-
-    cursor.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
-    row = cursor.fetchone()
-
-    bot_username = BOT_USERNAME
-
-    if not row:
-        referral_link = f"https://t.me/{bot_username}?start={user_id}"
-        cursor.execute(
-            "INSERT INTO users(user_id, username, subscribed, first_time, balance, referrals_count, total_earned, referrer_id, referral_link, created_at, blocked) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            (
-                user_id,
-                username,
-                0,
-                1,
-                0,
-                0,
-                0,
-                referrer_id,
-                referral_link,
-                join_date,
-                0,
-            ),
-        )
-        conn.commit()
-    else:
-        referral_link = (
-            row[8]
-            if row and row[8]
-            else f"https://t.me/{bot_username}?start={user_id}"
-        )
-        cursor.execute(
-            "UPDATE users SET username=?, referral_link=? WHERE user_id=?",
-            (username, referral_link, user_id),
-        )
-        conn.commit()
-
-    # СНГ-проверка (один раз для каждого нового пользователя)
-    ok_cis = await ensure_cis_access(user_id, message)
-    if not ok_cis:
-        return
-
-    ok = await ensure_subscribed(user_id, message)
-    if not ok:
-        return
-
-    await safe_answer_message(
-        message, "🔝 Главное меню", reply_markup=main_menu_keyboard()
-    )
-
-
-async def build_rating_text(time_frame: str):
-    cur = conn.cursor()
-
-    if time_frame == "24h":
-        start_day = start_of_today_kyiv()
-        end_day = start_day + timedelta(days=1)
-        cur.execute(
-            """
-            SELECT u.user_id, COUNT(r.referred_id)
-            FROM referral_rewards r
-            JOIN users u ON r.referrer_id = u.user_id
-            WHERE r.rewarded_at BETWEEN ? AND ?
-            GROUP BY r.referrer_id
-            ORDER BY COUNT(r.referred_id) DESC
-            LIMIT 10
-            """,
-            (start_day.isoformat(), end_day.isoformat()),
-        )
-        title = "🫂 Топ по рефералам за 24ч:\n\n"
-    else:
-        cur.execute(
-            """
-            SELECT u.user_id, COUNT(r.referred_id)
-            FROM referral_rewards r
-            JOIN users u ON r.referrer_id = u.user_id
-            GROUP BY r.referrer_id
-            ORDER BY COUNT(r.referred_id) DESC
-            LIMIT 10
-            """
-        )
-        title = "🫂 Топ по рефералам за всё время:\n\n"
-
-    rows = cur.fetchall()
-
-    if not rows:
-        return title + "Нет данных"
-
-    result = title
-
-    for i, row in enumerate(rows, 1):
-        uid, cnt = row
-        try:
-            chat = await bot.get_chat(uid)
-            full_name = f"{chat.first_name or ''} {chat.last_name or ''}".strip()
-            if not full_name:
-                full_name = chat.username or str(uid)
-        except Exception:
-            full_name = str(uid)
-
-        result += f"{i}. {full_name} — {cnt} рефералов\n"
-
-    return result
-
-
-async def send_rating(
-    user_id: int, time_frame: str, old_msg: types.Message = None
-):
-    now_dt = datetime.now()
-    last_time = last_rating_click.get(user_id)
-    if last_time and (now_dt - last_time).total_seconds() < 2:
-        return
-    last_rating_click[user_id] = now_dt
-
-    text = await build_rating_text(time_frame)
-    kb = rating_keyboard_single_for(time_frame)
-
-    if old_msg:
-        try:
-            await old_msg.delete()
-        except Exception:
-            pass
-
-    await send_photo_caption(
-        user_id, RATING_IMG_PATH, text, reply_markup=kb, parse_mode="HTML"
-    )
-
-
-@dp.callback_query(lambda c: c.data in ["rating_24h", "rating_all"])
-async def rating_callbacks(callback: types.CallbackQuery):
-    ok = await ensure_subscribed(callback.from_user.id, callback)
-    if not ok:
-        await callback.answer()
-        return
-
-    tf = "24h" if callback.data == "rating_24h" else "all"
-    text = await build_rating_text(tf)
-    kb = rating_keyboard_single_for(tf)
-    try:
-        await callback.message.edit_caption(
-            caption=text, reply_markup=kb, parse_mode="HTML"
-        )
-    except Exception:
-        try:
-            await send_photo_caption(
-                callback.from_user.id,
-                RATING_IMG_PATH,
-                text,
-                reply_markup=kb,
-                parse_mode="HTML",
-            )
-        except Exception:
-            await safe_answer_message(
-                callback.message, text, reply_markup=kb, parse_mode="HTML"
-            )
-    await callback.answer()
-
-
 async def ensure_subscribed(
     user_id: int, carrier, skip_subgram: bool = False
 ) -> bool:
@@ -1491,7 +1279,6 @@ async def ensure_subscribed(
     if len(row_user) > 12:
         gender = row_user[12]
 
-    # --- ИСПРАВЛЕНО: используем safe_* вместо прямого carrier.answer ---
     if gender not in ("male", "female", "legacy"):
         if user and chat_id:
             kb = InlineKeyboardMarkup(
@@ -1519,7 +1306,6 @@ async def ensure_subscribed(
                     reply_markup=kb,
                 )
         return False
-    # -----------------------------------------------------------------
 
     if not skip_subgram and user and chat_id:
         api_kwargs = {}
@@ -1668,6 +1454,393 @@ async def ensure_subscribed(
     return True
 
 
+@dp.message(CommandStart())
+async def start_handler(message: types.Message):
+    user_id = message.from_user.id
+    username = message.from_user.username or "None"
+    join_date = now_kyiv().isoformat()
+
+    cursor.execute("SELECT blocked, cis_ok FROM users WHERE user_id=?", (user_id,))
+    row_block = cursor.fetchone()
+    if row_block and row_block[0] == 1:
+        await safe_answer_message(
+            message, "🚫 Вы заблокированы администратором."
+        )
+        return
+
+    referrer_id = 0
+    if message.text and len(message.text.split()) > 1:
+        try:
+            referrer_id = int(message.text.split()[1])
+        except Exception:
+            referrer_id = 0
+    if referrer_id == user_id:
+        referrer_id = 0
+
+    cursor.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
+    row = cursor.fetchone()
+
+    bot_username = BOT_USERNAME
+
+    if not row:
+        referral_link = f"https://t.me/{bot_username}?start={user_id}"
+        # новый пользователь — cis_ok=2 (нужно пройти сайт-проверку)
+        cursor.execute(
+            "INSERT INTO users(user_id, username, subscribed, first_time, balance, referrals_count, total_earned, referrer_id, referral_link, created_at, blocked, cis_ok) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                user_id,
+                username,
+                0,
+                1,
+                0,
+                0,
+                0,
+                referrer_id,
+                referral_link,
+                join_date,
+                0,
+                2,  # 2 = ещё не проверен
+            ),
+        )
+        conn.commit()
+    else:
+        referral_link = (
+            row[8]
+            if row and row[8]
+            else f"https://t.me/{bot_username}?start={user_id}"
+        )
+        cursor.execute(
+            "UPDATE users SET username=?, referral_link=? WHERE user_id=?",
+            (username, referral_link, user_id),
+        )
+        conn.commit()
+
+    ok_cis = await ensure_cis_access(user_id, message)
+    if not ok_cis:
+        return
+
+    ok = await ensure_subscribed(user_id, message)
+    if not ok:
+        return
+
+    await safe_answer_message(
+        message, "🔝 Главное меню", reply_markup=main_menu_keyboard()
+    )
+
+
+async def build_rating_text(time_frame: str):
+    cur = conn.cursor()
+
+    if time_frame == "24h":
+        start_day = start_of_today_kyiv()
+        end_day = start_day + timedelta(days=1)
+        cur.execute(
+            """
+            SELECT u.user_id, COUNT(r.referred_id)
+            FROM referral_rewards r
+            JOIN users u ON r.referrer_id = u.user_id
+            WHERE r.rewarded_at BETWEEN ? AND ?
+            GROUP BY r.referrer_id
+            ORDER BY COUNT(r.referred_id) DESC
+            LIMIT 10
+            """,
+            (start_day.isoformat(), end_day.isoformat()),
+        )
+        title = "🫂 Топ по рефералам за 24ч:\n\n"
+    else:
+        cur.execute(
+            """
+            SELECT u.user_id, COUNT(r.referred_id)
+            FROM referral_rewards r
+            JOIN users u ON r.referrer_id = u.user_id
+            GROUP BY r.referrer_id
+            ORDER BY COUNT(r.referred_id) DESC
+            LIMIT 10
+            """
+        )
+        title = "🫂 Топ по рефералам за всё время:\n\n"
+
+    rows = cur.fetchall()
+
+    if not rows:
+        return title + "Нет данных"
+
+    result = title
+
+    for i, row in enumerate(rows, 1):
+        uid, cnt = row
+        try:
+            chat = await bot.get_chat(uid)
+            full_name = f"{chat.first_name or ''} {chat.last_name or ''}".strip()
+            if not full_name:
+                full_name = chat.username or str(uid)
+        except Exception:
+            full_name = str(uid)
+
+        result += f"{i}. {full_name} — {cnt} рефералов\n"
+
+    return result
+
+
+async def send_rating(
+    user_id: int, time_frame: str, old_msg: types.Message = None
+):
+    now_dt = datetime.now()
+    last_time = last_rating_click.get(user_id)
+    if last_time and (now_dt - last_time).total_seconds() < 2:
+        return
+    last_rating_click[user_id] = now_dt
+
+    text = await build_rating_text(time_frame)
+    kb = rating_keyboard_single_for(time_frame)
+
+    if old_msg:
+        try:
+            await old_msg.delete()
+        except Exception:
+            pass
+
+    await send_photo_caption(
+        user_id, RATING_IMG_PATH, text, reply_markup=kb, parse_mode="HTML"
+    )
+
+
+@dp.callback_query(lambda c: c.data in ["rating_24h", "rating_all"])
+async def rating_callbacks(callback: types.CallbackQuery):
+    ok = await ensure_subscribed(callback.from_user.id, callback)
+    if not ok:
+        await callback.answer()
+        return
+
+    tf = "24h" if callback.data == "rating_24h" else "all"
+    text = await build_rating_text(tf)
+    kb = rating_keyboard_single_for(tf)
+    try:
+        await callback.message.edit_caption(
+            caption=text, reply_markup=kb, parse_mode="HTML"
+        )
+    except Exception:
+        try:
+            await send_photo_caption(
+                callback.from_user.id,
+                RATING_IMG_PATH,
+                text,
+                reply_markup=kb,
+                parse_mode="HTML",
+            )
+        except Exception:
+            await safe_answer_message(
+                callback.message, text, reply_markup=kb, parse_mode="HTML"
+            )
+    await callback.answer()
+
+
+async def maybe_handle_admin_dialog(message: types.Message) -> bool:
+    uid = message.from_user.id
+    if uid not in admin_actions:
+        return False
+    if not await has_admin_access(uid):
+        admin_actions.pop(uid, None)
+        await safe_answer_message(message, "❌ Доступ закрыт.")
+        return True
+
+    state = admin_actions.get(uid) or {}
+    mode = state.get("mode")
+    step = state.get("await")
+
+    text_lower = (message.text or "").strip().lower() if message.text else ""
+
+    if text_lower in ("отмена", "cancel", "стоп"):
+        admin_actions.pop(uid, None)
+        await safe_answer_message(
+            message, "❎ Отменено.", reply_markup=admin_menu_kb()
+        )
+        return True
+
+    if mode == "broadcast":
+        if step == "sample":
+            state["sample_chat_id"] = message.chat.id
+            state["sample_message_id"] = message.message_id
+            state["await"] = "confirm"
+            admin_actions[uid] = state
+            await safe_answer_message(
+                message,
+                "✅ Сообщение получено.\n\nНапишите «да» для подтверждения рассылки всем пользователям в базе, либо «отмена».",
+                reply_markup=admin_menu_kb(),
+            )
+            return True
+
+        if step == "confirm":
+            if text_lower in ("да", "yes", "y"):
+                sample_chat_id = state.get("sample_chat_id")
+                sample_message_id = state.get("sample_message_id")
+                admin_actions.pop(uid, None)
+                await safe_answer_message(
+                    message, "🚀 Запускаю рассылку…", reply_markup=admin_menu_kb()
+                )
+                await do_broadcast(uid, sample_chat_id, sample_message_id)
+                return True
+            else:
+                await safe_answer_message(
+                    message,
+                    "Не понял. Напишите «да» для запуска рассылки или «отмена».",
+                    reply_markup=admin_menu_kb(),
+                )
+                return True
+
+    if mode == "set_ref_reward" and step == "value":
+        try:
+            new_reward = int((message.text or "").strip())
+        except Exception:
+            await safe_answer_message(
+                message,
+                "❗ Введите целое число (например: 4 или 5).",
+                reply_markup=admin_menu_kb(),
+            )
+            return True
+        if new_reward <= 0:
+            await safe_answer_message(
+                message,
+                "❗ Награда должна быть положительным числом.",
+                reply_markup=admin_menu_kb(),
+            )
+            return True
+
+        set_referral_reward(new_reward)
+        admin_actions.pop(uid, None)
+        await safe_answer_message(
+            message,
+            f"✅ Новая награда за реферала установлена: {new_reward}⭐️",
+            reply_markup=admin_menu_kb(),
+        )
+        return True
+
+    if step == "user":
+        target_id, target_username = parse_user_ref(message.text or "")
+        if not target_id:
+            await safe_answer_message(
+                message,
+                "❗ Не нашёл такого пользователя. Пришлите корректный @username или user_id, либо напишите «отмена».",
+                reply_markup=admin_menu_kb(),
+            )
+            return True
+
+        if mode == "reset":
+            cursor.execute(
+                "UPDATE users SET balance=0, referrals_count=0, total_earned=0 WHERE user_id=?",
+                (target_id,),
+            )
+            cursor.execute(
+                "DELETE FROM referral_rewards WHERE referrer_id=? OR referred_id=?",
+                (target_id, target_id),
+            )
+            cursor.execute(
+                "DELETE FROM withdrawals WHERE user_id=?", (target_id,)
+            )
+            conn.commit()
+            admin_actions.pop(uid, None)
+            await safe_answer_message(
+                message,
+                f"🧹 Пользователь {target_id} обнулён.",
+                reply_markup=admin_menu_kb(),
+            )
+            return True
+
+        if mode == "toggle":
+            cursor.execute(
+                "SELECT blocked FROM users WHERE user_id=?", (target_id,)
+            )
+            row = cursor.fetchone()
+            if not row:
+                await safe_answer_message(
+                    message,
+                    "❗ Такого пользователя нет в базе.",
+                    reply_markup=admin_menu_kb(),
+                )
+                admin_actions.pop(uid, None)
+                return True
+            current_status = row[0]
+            if current_status == 1:
+                await unblock_user_everywhere(target_id)
+                status_text = "разблокирован"
+            else:
+                await block_user_everywhere(target_id)
+                status_text = "заблокирован"
+            admin_actions.pop(uid, None)
+            await safe_answer_message(
+                message,
+                f"🚫 Пользователь {target_id} {status_text}.",
+                reply_markup=admin_menu_kb(),
+            )
+            return True
+
+        if mode == "grant":
+            state["await"] = "amount"
+            state["target_id"] = target_id
+            admin_actions[uid] = state
+            await safe_answer_message(
+                message,
+                f"💳 Ок. Сколько ⭐️ начислить пользователю {target_id}? Напишите число. («отмена» для выхода)",
+                reply_markup=admin_menu_kb(),
+            )
+            return True
+
+    if step == "amount" and mode == "grant":
+        try:
+            amount = float((message.text or "").replace(",", "."))
+        except Exception:
+            await safe_answer_message(
+                message,
+                "❗ Введите число (например: 10 или 25.0).",
+                reply_markup=admin_menu_kb(),
+            )
+            return True
+        if amount <= 0:
+            await safe_answer_message(
+                message,
+                "❗ Сумма должна быть положительной.",
+                reply_markup=admin_menu_kb(),
+            )
+            return True
+        target_id = state.get("target_id")
+        if not target_id:
+            admin_actions.pop(uid, None)
+            await safe_answer_message(
+                message,
+                "⚠️ Ошибка контекста. Начните заново.",
+                reply_markup=admin_menu_kb(),
+            )
+            return True
+
+        cursor.execute(
+            "UPDATE users SET balance = balance + ? WHERE user_id=?",
+            (amount, target_id),
+        )
+        conn.commit()
+        admin_actions.pop(uid, None)
+
+        await safe_send_message(
+            target_id,
+            f"🎁 <b>На ваш баланс начислено {amount}⭐️</b>",
+            parse_mode="HTML",
+            reply_markup=main_menu_keyboard(),
+        )
+        await safe_answer_message(
+            message,
+            f"✅ Начислено {amount}⭐️ пользователю {target_id}.",
+            reply_markup=admin_menu_kb(),
+        )
+        return True
+
+    await safe_answer_message(
+        message,
+        "❗ Неверный ввод. Пришлите @username или user_id, либо «отмена».",
+        reply_markup=admin_menu_kb(),
+    )
+    return True
+
+
 @dp.callback_query(lambda c: c.data in ("gender_male", "gender_female"))
 async def gender_select_callback(callback: types.CallbackQuery):
     user_id = callback.from_user.id
@@ -1744,68 +1917,284 @@ async def subgram_callbacks(callback: types.CallbackQuery):
         )
 
 
-# ========= ХЕНДЛЕР ДЛЯ WebApp CIS-CHECK =========
-@dp.message(lambda m: m.web_app_data and m.web_app_data.data)
-async def cis_webapp_result_handler(message: types.Message):
-    """
-    Сюда прилетает результат sendData(...) из WebApp:
-    { "event": "cis_check", "is_cis": true/false/null, "country": "UA" }
-    """
-    raw = message.web_app_data.data
+@dp.callback_query(
+    lambda c: c.data
+    and (
+        c.data.startswith("confirm_amount:")
+        or c.data == "withdraw_back"
+        or c.data.startswith("create_withdraw:")
+        or c.data.startswith("redo_withdraw_user:")
+    )
+)
+async def withdraw_confirm_handlers(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+
+    ok = await ensure_subscribed(user_id, callback)
+    if not ok:
+        await callback.answer()
+        return
+
+    data = callback.data
+
+    if data == "withdraw_back":
+        user_states.pop(user_id, None)
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await safe_send_message(
+            user_id, "🔝 Главное меню", reply_markup=main_menu_keyboard()
+        )
+        await callback.answer()
+        return
+
+    if data.startswith("confirm_amount:"):
+        parts = data.split(":")
+        try:
+            _, uid_s, amount_s = parts
+            uid = int(uid_s)
+            amount = int(amount_s)
+        except Exception:
+            await callback.answer()
+            return
+        if uid != user_id:
+            await callback.answer("Это не ваша заявка.", show_alert=True)
+            return
+        user_states[user_id] = {
+            "stage": "await_username",
+            "pending_amount": amount,
+        }
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await safe_send_message(
+            user_id,
+            "🗣 <b>Укажите свой юзернейм через @</b>\n\n<b>Например: @aaR1ss</b>",
+            reply_markup=back_keyboard(),
+            parse_mode="HTML",
+        )
+        await callback.answer()
+        return
+
+    if data.startswith("create_withdraw:"):
+        parts = data.split(":")
+        try:
+            _, uid_s = parts
+            uid = int(uid_s)
+        except Exception:
+            await callback.answer()
+            return
+        if uid != user_id:
+            await callback.answer("Это не ваша заявка.", show_alert=True)
+            return
+        state = user_states.get(user_id)
+        if (
+            not state
+            or "pending_amount" not in state
+            or "pending_username" not in state
+        ):
+            await callback.answer(
+                "Нет данных для создания заявки.", show_alert=True
+            )
+            return
+        amount = float(state["pending_amount"])
+        to_username = state["pending_username"]
+
+        cursor.execute(
+            "SELECT balance FROM users WHERE user_id=?", (user_id,)
+        )
+        r = cursor.fetchone()
+        balance = float(r[0]) if r and r[0] is not None else 0.0
+        if amount > balance:
+            user_states.pop(user_id, None)
+            try:
+                await callback.message.delete()
+            except Exception:
+                pass
+            await safe_send_message(
+                user_id,
+                f"Недостаточно средств. Ваш баланс: {balance} ⭐️",
+                reply_markup=back_keyboard(),
+            )
+            await callback.answer()
+            return
+
+        cursor.execute(
+            "INSERT INTO withdrawals(user_id, amount, to_username, status, created_at) VALUES(?,?,?,?,?)",
+            (user_id, amount, to_username, "pending", now_kyiv().isoformat()),
+        )
+        withdraw_id = cursor.lastrowid
+        cursor.execute(
+            "UPDATE users SET balance = balance - ? WHERE user_id=?",
+            (amount, user_id),
+        )
+        conn.commit()
+
+        kb_admin = admin_withdraw_kb(withdraw_id)
+        cursor.execute(
+            "SELECT username FROM users WHERE user_id=?", (user_id,),
+        )
+        usr_row = cursor.fetchone()
+        usr = usr_row[0] if usr_row and usr_row[0] else "None"
+        admin_text = (
+            f"Заявка #{withdraw_id}\n"
+            f"Пользователь: @{usr} ({user_id})\n"
+            f"Сумма: {amount} ⭐️\n"
+            f"Кому: {to_username}\n"
+            f"Время: {now_kyiv().isoformat()}"
+        )
+        admin_msg = None
+        try:
+            withdraw_chat = normalize_chat_target(CHANNEL_FOR_WITHDRAW)
+            admin_msg = await bot.send_message(
+                withdraw_chat, admin_text, reply_markup=kb_admin
+            )
+        except Exception as e:
+            _qwarn(
+                f"[WARN] send to CHANNEL_FOR_WITHDRAW failed: {type(e).__name__}"
+            )
+        admin_msg_id = (
+            admin_msg.message_id
+            if admin_msg and hasattr(admin_msg, "message_id")
+            else None
+        )
+
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+
+        msg = await safe_send_message(
+            user_id,
+            "✅ <b>Заявка на вывод создана</b>\n\n"
+            f"<b>Сумма вывода:</b> {amount}⭐️\n"
+            f"<b>Юзернейм:</b> {to_username}",
+            reply_markup=main_menu_keyboard(),
+            parse_mode="HTML",
+        )
+        try:
+            if msg and hasattr(msg, "message_id"):
+                cursor.execute(
+                    "UPDATE withdrawals SET user_msg_id=?, admin_msg_id=? WHERE id=?",
+                    (msg.message_id, admin_msg_id, withdraw_id),
+                )
+                conn.commit()
+        except Exception as e:
+            _qwarn(
+                f"[WARN] store user_msg_id/admin_msg_id failed: {type(e).__name__}"
+            )
+
+        user_states.pop(user_id, None)
+        await callback.answer()
+        return
+
+    if data.startswith("redo_withdraw_user:"):
+        parts = data.split(":")
+        try:
+            _, uid_s = parts
+            uid = int(uid_s)
+        except Exception:
+            await callback.answer()
+            return
+        if uid != user_id:
+            await callback.answer("Это не ваша заявка.", show_alert=True)
+            return
+        prev_amount = user_states.get(user_id, {}).get("pending_amount", 0)
+        user_states[user_id] = {
+            "stage": "await_username",
+            "pending_amount": prev_amount,
+        }
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await safe_send_message(
+            user_id,
+            "🗣 <b>Укажите свой юзернейм через @</b>\n\n<b>Например: @aaR1ss</b>",
+            reply_markup=back_keyboard(),
+            parse_mode="HTML",
+        )
+        await callback.answer()
+        return
+
+
+@dp.callback_query(
+    lambda c: c.data
+    and (c.data.startswith("admin_paid:") or c.data.startswith("admin_reject:"))
+)
+async def admin_withdraw_handlers(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    if not await has_admin_access(user_id):
+        await callback.answer("❌ Нет доступа.", show_alert=True)
+        return
+
+    data = callback.data
+    parts = data.split(":")
     try:
-        data = json.loads(raw)
+        _, withdraw_id_s = parts
+        withdraw_id = int(withdraw_id_s)
     except Exception:
-        await safe_answer_message(
-            message,
-            "❗ Не удалось прочитать данные проверки страны.",
+        await callback.answer()
+        return
+
+    cursor.execute(
+        "SELECT user_id, amount, status, user_msg_id FROM withdrawals WHERE id=?",
+        (withdraw_id,),
+    )
+    row = cursor.fetchone()
+    if not row:
+        await callback.answer("Заявка не найдена.", show_alert=True)
+        return
+    target_user_id, amount, status, user_msg_id = row
+
+    if user_msg_id:
+        try:
+            await bot.delete_message(target_user_id, user_msg_id)
+        except Exception:
+            pass
+
+    if data.startswith("admin_paid:"):
+        cursor.execute(
+            "UPDATE withdrawals SET status='paid' WHERE id=?",
+            (withdraw_id,),
+        )
+        conn.commit()
+        await safe_send_message(
+            target_user_id,
+            f"💸 <b>Ваша выплата в размере {amount}⭐️ была успешно отправлена вам!</b>",
+            parse_mode="HTML",
             reply_markup=main_menu_keyboard(),
+        )
+        await callback.answer("✅ Пометка как выплачено поставлена.")
+        await safe_edit_text(
+            callback.message, (callback.message.text or "") + "\n\n✅ Выплачено"
         )
         return
 
-    if data.get("event") != "cis_check":
-        # другие WebApp события игнорируем
+    if data.startswith("admin_reject:"):
+        cursor.execute(
+            "UPDATE withdrawals SET status='rejected' WHERE id=?",
+            (withdraw_id,),
+        )
+        cursor.execute(
+            "UPDATE users SET balance = balance + ? WHERE user_id=?",
+            (amount, target_user_id),
+        )
+        conn.commit()
+        await safe_send_message(
+            target_user_id,
+            f"❌ <b>Ваша заявка была отклонена. {amount}⭐️ возвращены на баланс</b>",
+            parse_mode="HTML",
+            reply_markup=main_menu_keyboard(),
+        )
+        await callback.answer(
+            "❌ Заявка отклонена, средства возвращены."
+        )
+        await safe_edit_text(
+            callback.message, (callback.message.text or "") + "\n\n❌ Отклонено"
+        )
         return
-
-    is_cis = data.get("is_cis")
-    country = data.get("country")
-    user_id = message.from_user.id
-
-    if is_cis is True:
-        try:
-            cursor.execute(
-                "UPDATE users SET cis_ok=1 WHERE user_id=?", (user_id,)
-            )
-            conn.commit()
-        except Exception:
-            pass
-        await safe_answer_message(
-            message,
-            "✅ Страна подтверждена, бот доступен.",
-            reply_markup=main_menu_keyboard(),
-        )
-    elif is_cis is False:
-        try:
-            cursor.execute(
-                "UPDATE users SET cis_ok=0 WHERE user_id=?", (user_id,)
-            )
-            conn.commit()
-        except Exception:
-            pass
-        try:
-            await block_user_everywhere(user_id)
-        except Exception:
-            pass
-        await safe_answer_message(
-            message,
-            "🚫 По IP вы не из стран СНГ, бот недоступен.",
-            reply_markup=ReplyKeyboardRemove(),
-        )
-    else:
-        await safe_answer_message(
-            message,
-            "⚠️ Не удалось точно определить страну. Попробуйте ещё раз позже.",
-            reply_markup=main_menu_keyboard(),
-        )
 
 
 @dp.message()
@@ -2178,491 +2567,6 @@ async def main_menu_handler(message: types.Message):
     await safe_answer_message(
         message, "🔝 Главное меню", reply_markup=main_menu_keyboard()
     )
-
-
-async def maybe_handle_admin_dialog(message: types.Message) -> bool:
-    uid = message.from_user.id
-    if uid not in admin_actions:
-        return False
-    if not await has_admin_access(uid):
-        admin_actions.pop(uid, None)
-        await safe_answer_message(message, "❌ Доступ закрыт.")
-        return True
-
-    state = admin_actions.get(uid) or {}
-    mode = state.get("mode")
-    step = state.get("await")
-
-    text_lower = (message.text or "").strip().lower() if message.text else ""
-
-    if text_lower in ("отмена", "cancel", "стоп"):
-        admin_actions.pop(uid, None)
-        await safe_answer_message(
-            message, "❎ Отменено.", reply_markup=admin_menu_kb()
-        )
-        return True
-
-    if mode == "broadcast":
-        if step == "sample":
-            state["sample_chat_id"] = message.chat.id
-            state["sample_message_id"] = message.message_id
-            state["await"] = "confirm"
-            admin_actions[uid] = state
-            await safe_answer_message(
-                message,
-                "✅ Сообщение получено.\n\nНапишите «да» для подтверждения рассылки всем пользователям в базе, либо «отмена».",
-                reply_markup=admin_menu_kk(),
-            )
-            return True
-
-        if step == "confirm":
-            if text_lower in ("да", "yes", "y"):
-                sample_chat_id = state.get("sample_chat_id")
-                sample_message_id = state.get("sample_message_id")
-                admin_actions.pop(uid, None)
-                await safe_answer_message(
-                    message, "🚀 Запускаю рассылку…", reply_markup=admin_menu_kb()
-                )
-                await do_broadcast(uid, sample_chat_id, sample_message_id)
-                return True
-            else:
-                await safe_answer_message(
-                    message,
-                    "Не понял. Напишите «да» для запуска рассылки или «отмена».",
-                    reply_markup=admin_menu_kb(),
-                )
-                return True
-
-    if mode == "set_ref_reward" and step == "value":
-        try:
-            new_reward = int((message.text or "").strip())
-        except Exception:
-            await safe_answer_message(
-                message,
-                "❗ Введите целое число (например: 4 или 5).",
-                reply_markup=admin_menu_kb(),
-            )
-            return True
-        if new_reward <= 0:
-            await safe_answer_message(
-                message,
-                "❗ Награда должна быть положительным числом.",
-                reply_markup=admin_menu_kb(),
-            )
-            return True
-
-        set_referral_reward(new_reward)
-        admin_actions.pop(uid, None)
-        await safe_answer_message(
-            message,
-            f"✅ Новая награда за реферала установлена: {new_reward}⭐️",
-            reply_markup=admin_menu_kb(),
-        )
-        return True
-
-    if step == "user":
-        target_id, target_username = parse_user_ref(message.text or "")
-        if not target_id:
-            await safe_answer_message(
-                message,
-                "❗ Не нашёл такого пользователя. Пришлите корректный @username или user_id, либо напишите «отмена».",
-                reply_markup=admin_menu_kb(),
-            )
-            return True
-
-        if mode == "reset":
-            cursor.execute(
-                "UPDATE users SET balance=0, referrals_count=0, total_earned=0 WHERE user_id=?",
-                (target_id,),
-            )
-            cursor.execute(
-                "DELETE FROM referral_rewards WHERE referrer_id=? OR referred_id=?",
-                (target_id, target_id),
-            )
-            cursor.execute(
-                "DELETE FROM withdrawals WHERE user_id=?", (target_id,)
-            )
-            conn.commit()
-            admin_actions.pop(uid, None)
-            await safe_answer_message(
-                message,
-                f"🧹 Пользователь {target_id} обнулён.",
-                reply_markup=admin_menu_kb(),
-            )
-            return True
-
-        if mode == "toggle":
-            cursor.execute(
-                "SELECT blocked FROM users WHERE user_id=?", (target_id,)
-            )
-            row = cursor.fetchone()
-            if not row:
-                await safe_answer_message(
-                    message,
-                    "❗ Такого пользователя нет в базе.",
-                    reply_markup=admin_menu_kb(),
-                )
-                admin_actions.pop(uid, None)
-                return True
-            current_status = row[0]
-            if current_status == 1:
-                await unblock_user_everywhere(target_id)
-                status_text = "разблокирован"
-            else:
-                await block_user_everywhere(target_id)
-                status_text = "заблокирован"
-            admin_actions.pop(uid, None)
-            await safe_answer_message(
-                message,
-                f"🚫 Пользователь {target_id} {status_text}.",
-                reply_markup=admin_menu_kb(),
-            )
-            return True
-
-        if mode == "grant":
-            state["await"] = "amount"
-            state["target_id"] = target_id
-            admin_actions[uid] = state
-            await safe_answer_message(
-                message,
-                f"💳 Ок. Сколько ⭐️ начислить пользователю {target_id}? Напишите число. («отмена» для выхода)",
-                reply_markup=admin_menu_kb(),
-            )
-            return True
-
-    if step == "amount" and mode == "grant":
-        try:
-            amount = float((message.text or "").replace(",", "."))
-        except Exception:
-            await safe_answer_message(
-                message,
-                "❗ Введите число (например: 10 или 25.0).",
-                reply_markup=admin_menu_kb(),
-            )
-            return True
-        if amount <= 0:
-            await safe_answer_message(
-                message,
-                "❗ Сумма должна быть положительной.",
-                reply_markup=admin_menu_kb(),
-            )
-            return True
-        target_id = state.get("target_id")
-        if not target_id:
-            admin_actions.pop(uid, None)
-            await safe_answer_message(
-                message,
-                "⚠️ Ошибка контекста. Начните заново.",
-                reply_markup=admin_menu_kb(),
-            )
-            return True
-
-        cursor.execute(
-            "UPDATE users SET balance = balance + ? WHERE user_id=?",
-            (amount, target_id),
-        )
-        conn.commit()
-        admin_actions.pop(uid, None)
-
-        await safe_send_message(
-            target_id,
-            f"🎁 <b>На ваш баланс начислено {amount}⭐️</b>",
-            parse_mode="HTML",
-            reply_markup=main_menu_keyboard(),
-        )
-        await safe_answer_message(
-            message,
-            f"✅ Начислено {amount}⭐️ пользователю {target_id}.",
-            reply_markup=admin_menu_kb(),
-        )
-        return True
-
-    await safe_answer_message(
-        message,
-        "❗ Неверный ввод. Пришлите @username или user_id, либо «отмена».",
-        reply_markup=admin_menu_kb(),
-    )
-    return True
-
-
-@dp.callback_query(
-    lambda c: c.data
-    and (
-        c.data.startswith("confirm_amount:")
-        or c.data == "withdraw_back"
-        or c.data.startswith("create_withdraw:")
-        or c.data.startswith("redo_withdraw_user:")
-    )
-)
-async def withdraw_confirm_handlers(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-
-    ok = await ensure_subscribed(user_id, callback)
-    if not ok:
-        await callback.answer()
-        return
-
-    data = callback.data
-
-    if data == "withdraw_back":
-        user_states.pop(user_id, None)
-        try:
-            await callback.message.delete()
-        except Exception:
-            pass
-        await safe_send_message(
-            user_id, "🔝 Главное меню", reply_markup=main_menu_keyboard()
-        )
-        await callback.answer()
-        return
-
-    if data.startswith("confirm_amount:"):
-        parts = data.split(":")
-        try:
-            _, uid_s, amount_s = parts
-            uid = int(uid_s)
-            amount = int(amount_s)
-        except Exception:
-            await callback.answer()
-            return
-        if uid != user_id:
-            await callback.answer("Это не ваша заявка.", show_alert=True)
-            return
-        user_states[user_id] = {
-            "stage": "await_username",
-            "pending_amount": amount,
-        }
-        try:
-            await callback.message.delete()
-        except Exception:
-            pass
-        await safe_send_message(
-            user_id,
-            "🗣 <b>Укажите свой юзернейм через @</b>\n\n<b>Например: @aaR1ss</b>",
-            reply_markup=back_keyboard(),
-            parse_mode="HTML",
-        )
-        await callback.answer()
-        return
-
-    if data.startswith("create_withdraw:"):
-        parts = data.split(":")
-        try:
-            _, uid_s = parts
-            uid = int(uid_s)
-        except Exception:
-            await callback.answer()
-            return
-        if uid != user_id:
-            await callback.answer("Это не ваша заявка.", show_alert=True)
-            return
-        state = user_states.get(user_id)
-        if (
-            not state
-            or "pending_amount" not in state
-            or "pending_username" not in state
-        ):
-            await callback.answer(
-                "Нет данных для создания заявки.", show_alert=True
-            )
-            return
-        amount = float(state["pending_amount"])
-        to_username = state["pending_username"]
-
-        cursor.execute(
-            "SELECT balance FROM users WHERE user_id=?", (user_id,)
-        )
-        r = cursor.fetchone()
-        balance = float(r[0]) if r and r[0] is not None else 0.0
-        if amount > balance:
-            user_states.pop(user_id, None)
-            try:
-                await callback.message.delete()
-            except Exception:
-                pass
-            await safe_send_message(
-                user_id,
-                f"Недостаточно средств. Ваш баланс: {balance} ⭐️",
-                reply_markup=back_keyboard(),
-            )
-            await callback.answer()
-            return
-
-        cursor.execute(
-            "INSERT INTO withdrawals(user_id, amount, to_username, status, created_at) VALUES(?,?,?,?,?)",
-            (user_id, amount, to_username, "pending", now_kyiv().isoformat()),
-        )
-        withdraw_id = cursor.lastrowid
-        cursor.execute(
-            "UPDATE users SET balance = balance - ? WHERE user_id=?",
-            (amount, user_id),
-        )
-        conn.commit()
-
-        kb_admin = admin_withdraw_kb(withdraw_id)
-        cursor.execute(
-            "SELECT username FROM users WHERE user_id=?", (user_id,),
-        )
-        usr_row = cursor.fetchone()
-        usr = usr_row[0] if usr_row and usr_row[0] else "None"
-        admin_text = (
-            f"Заявка #{withdraw_id}\n"
-            f"Пользователь: @{usr} ({user_id})\n"
-            f"Сумма: {amount} ⭐️\n"
-            f"Кому: {to_username}\n"
-            f"Время: {now_kyiv().isoformat()}"
-        )
-        admin_msg = None
-        try:
-            withdraw_chat = normalize_chat_target(CHANNEL_FOR_WITHDRAW)
-            admin_msg = await bot.send_message(
-                withdraw_chat, admin_text, reply_markup=kb_admin
-            )
-        except Exception as e:
-            _qwarn(
-                f"[WARN] send to CHANNEL_FOR_WITHDRAW failed: {type(e).__name__}"
-            )
-        admin_msg_id = (
-            admin_msg.message_id
-            if admin_msg and hasattr(admin_msg, "message_id")
-            else None
-        )
-
-        try:
-            await callback.message.delete()
-        except Exception:
-            pass
-
-        msg = await safe_send_message(
-            user_id,
-            "✅ <b>Заявка на вывод создана</b>\n\n"
-            f"<b>Сумма вывода:</b> {amount}⭐️\n"
-            f"<b>Юзернейм:</b> {to_username}",
-            reply_markup=main_menu_keyboard(),
-            parse_mode="HTML",
-        )
-        try:
-            if msg and hasattr(msg, "message_id"):
-                cursor.execute(
-                    "UPDATE withdrawals SET user_msg_id=?, admin_msg_id=? WHERE id=?",
-                    (msg.message_id, admin_msg_id, withdraw_id),
-                )
-                conn.commit()
-        except Exception as e:
-            _qwarn(
-                f"[WARN] store user_msg_id/admin_msg_id failed: {type(e).__name__}"
-            )
-
-        user_states.pop(user_id, None)
-        await callback.answer()
-        return
-
-    if data.startswith("redo_withdraw_user:"):
-        parts = data.split(":")
-        try:
-            _, uid_s = parts
-            uid = int(uid_s)
-        except Exception:
-            await callback.answer()
-            return
-        if uid != user_id:
-            await callback.answer("Это не ваша заявка.", show_alert=True)
-            return
-        prev_amount = user_states.get(user_id, {}).get("pending_amount", 0)
-        user_states[user_id] = {
-            "stage": "await_username",
-            "pending_amount": prev_amount,
-        }
-        try:
-            await callback.message.delete()
-        except Exception:
-            pass
-        await safe_send_message(
-            user_id,
-            "🗣 <b>Укажите свой юзернейм через @</b>\n\n<b>Например: @aaR1ss</b>",
-            reply_markup=back_keyboard(),
-            parse_mode="HTML",
-        )
-        await callback.answer()
-        return
-
-
-@dp.callback_query(
-    lambda c: c.data
-    and (c.data.startswith("admin_paid:") or c.data.startswith("admin_reject:"))
-)
-async def admin_withdraw_handlers(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    if not await has_admin_access(user_id):
-        await callback.answer("❌ Нет доступа.", show_alert=True)
-        return
-
-    data = callback.data
-    parts = data.split(":")
-    try:
-        _, withdraw_id_s = parts
-        withdraw_id = int(withdraw_id_s)
-    except Exception:
-        await callback.answer()
-        return
-
-    cursor.execute(
-        "SELECT user_id, amount, status, user_msg_id FROM withdrawals WHERE id=?",
-        (withdraw_id,),
-    )
-    row = cursor.fetchone()
-    if not row:
-        await callback.answer("Заявка не найдена.", show_alert=True)
-        return
-    target_user_id, amount, status, user_msg_id = row
-
-    if user_msg_id:
-        try:
-            await bot.delete_message(target_user_id, user_msg_id)
-        except Exception:
-            pass
-
-    if data.startswith("admin_paid:"):
-        cursor.execute(
-            "UPDATE withdrawals SET status='paid' WHERE id=?",
-            (withdraw_id,),
-        )
-        conn.commit()
-        await safe_send_message(
-            target_user_id,
-            f"💸 <b>Ваша выплата в размере {amount}⭐️ была успешно отправлена вам!</b>",
-            parse_mode="HTML",
-            reply_markup=main_menu_keyboard(),
-        )
-        await callback.answer("✅ Пометка как выплачено поставлена.")
-        await safe_edit_text(
-            callback.message, (callback.message.text or "") + "\n\n✅ Выплачено"
-        )
-        return
-
-    if data.startswith("admin_reject:"):
-        cursor.execute(
-            "UPDATE withdrawals SET status='rejected' WHERE id=?",
-            (withdraw_id,),
-        )
-        cursor.execute(
-            "UPDATE users SET balance = balance + ? WHERE user_id=?",
-            (amount, target_user_id),
-        )
-        conn.commit()
-        await safe_send_message(
-            target_user_id,
-            f"❌ <b>Ваша заявка была отклонена. {amount}⭐️ возвращены на баланс</b>",
-            parse_mode="HTML",
-            reply_markup=main_menu_keyboard(),
-        )
-        await callback.answer(
-            "❌ Заявка отклонена, средства возвращены."
-        )
-        await safe_edit_text(
-            callback.message, (callback.message.text or "") + "\n\n❌ Отклонено"
-        )
-        return
 
 
 async def main():
