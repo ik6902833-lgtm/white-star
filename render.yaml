@@ -6,12 +6,10 @@ services:
     plan: starter
     buildCommand: "pip install -r requirements.txt"
     startCommand: "python bot.py"
-
     disk:
       name: star-disk
       mountPath: /data
       sizeGB: 1
-
     envVars:
       - key: API_TOKEN
         sync: false
@@ -21,3 +19,12 @@ services:
         value: "sdafsadfsdaf13"
       - key: CHANNEL_FOR_WITHDRAW
         value: "-1003003114178"
+
+  - type: web
+    name: cis-webapp
+    env: python
+    region: frankfurt
+    plan: free
+    rootDir: cis_webapp
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "uvicorn main:app --host 0.0.0.0 --port $PORT"
