@@ -2,11 +2,13 @@ import os
 import sqlite3
 import datetime
 from typing import Optional
+import json
+import urllib.request
+import urllib.error
 
 from fastapi import FastAPI, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
-import httpx
 
 # Путь к БД с результатами проверки
 DB_PATH = os.getenv("CIS_DB_PATH", "/data/cis_checks.db")
@@ -65,14 +67,17 @@ def init_db() -> None:
 def on_startup() -> None:
     init_db()
 
-
 # ---------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ----------
 
 def get_client_ip(request: Request) -> Optional[str]:
     """
     Вытаскиваем IP пользователя с учётом прокси Render (X-Forwarded-For).
+    ВАЖНО: тут мы НИЧЕГО не отбрасываем, всегда возвращаем то, что есть.
     """
-    xff = request.headers.get("x-forwarded-for") or request.headers.get("X-Forwarded-For")
+    xff = (
+        request.headers.get("x-forwarded-for")
+        or request.headers.get("X-Forwarded-For")
+    )
     if xff:
         # может быть "ip1, ip2, ip3"
         return xff.split(",")[0].strip()
@@ -83,30 +88,30 @@ def get_client_ip(request: Request) -> Optional[str]:
     return None
 
 
-async def get_country_by_ip(ip: Optional[str]) -> Optional[str]:
+def get_country_by_ip(ip: Optional[str]) -> Optional[str]:
     """
     Определяем страну по IP через внешний сервис.
-    Сейчас используется https://ipapi.co/{ip}/json/
-
-    Возвращает ISO-код страны (например "UA", "RU") или None.
+    Используем https://ipapi.co/{ip}/json/ и НИЧЕГО не режем,
+    чтобы по-любому попытаться получить страну.
     """
     if not ip:
         return None
 
-    # Больше НЕ пропускаем локальные IP — всегда пытаемся узнать страну
+    # Всегда пробуем запрос. Даже если IP кажется "странным".
     url = f"https://ipapi.co/{ip}/json/"
+
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(url)
-            if resp.status_code != 200:
+        req = urllib.request.Request(url, headers={"User-Agent": "cis-checker/1.0"})
+        with urllib.request.urlopen(req, timeout=5.0) as resp:
+            if resp.status != 200:
                 return None
-            data = resp.json()
-            code = data.get("country_code")
-            if isinstance(code, str) and len(code) == 2:
-                return code.upper()
-    except Exception:
+            data = json.loads(resp.read().decode("utf-8", errors="ignore"))
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError):
         return None
 
+    code = data.get("country_code")
+    if isinstance(code, str) and len(code) == 2:
+        return code.upper()
     return None
 
 
@@ -169,7 +174,6 @@ def load_status(user_id: int):
     conn.close()
     return row
 
-
 # ---------- РОУТЫ ----------
 
 @app.get("/", response_class=HTMLResponse)
@@ -182,14 +186,14 @@ async def index(request: Request, uid: Optional[int] = Query(None)):
     """
 
     ip = get_client_ip(request)
-    country = await get_country_by_ip(ip)
+    country = get_country_by_ip(ip)
     is_cis = None
 
     if country is not None:
         is_cis = country in CIS_COUNTRIES
 
-    # Даже если country = None, мы всё равно сохраняем IP и факт попытки проверки
     if uid is not None:
+        # ВСЕГДА сохраняем IP и то, что удалось определить по стране
         save_result(uid, ip, country, is_cis)
 
     # Отдаём твой index.html, если он есть
