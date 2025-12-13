@@ -10,8 +10,12 @@ from fastapi import FastAPI, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 
+# Базовая папка этого модуля
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # Путь к БД с результатами проверки
-DB_PATH = os.getenv("CIS_DB_PATH", "/data/cis_checks.db")
+# По умолчанию кладём БД рядом с main.py, чтобы не было проблем с правами на /data
+DB_PATH = os.getenv("CIS_DB_PATH", os.path.join(BASE_DIR, "cis_checks.db"))
 
 # Список стран СНГ / ближнего зарубежья по ISO-кодам
 CIS_COUNTRIES = {
@@ -29,7 +33,6 @@ CIS_COUNTRIES = {
     "TM",  # Туркменистан
 }
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 INDEX_PATH = os.path.join(BASE_DIR, "index.html")
 
 app = FastAPI(title="CIS WebApp Checker")
@@ -45,7 +48,9 @@ app.add_middleware(
 # ---------- ИНИЦИАЛИЗАЦИЯ БД ----------
 
 def init_db() -> None:
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    """
+    Создаём SQLite-базу в DB_PATH (папка уже существует, т.к. это BASE_DIR).
+    """
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute(
@@ -72,7 +77,7 @@ def on_startup() -> None:
 def get_client_ip(request: Request) -> Optional[str]:
     """
     Вытаскиваем IP пользователя с учётом прокси Render (X-Forwarded-For).
-    ВАЖНО: тут мы НИЧЕГО не отбрасываем, всегда возвращаем то, что есть.
+    НИЧЕГО не режем — всегда возвращаем то, что есть.
     """
     xff = (
         request.headers.get("x-forwarded-for")
@@ -97,15 +102,19 @@ def get_country_by_ip(ip: Optional[str]) -> Optional[str]:
     if not ip:
         return None
 
-    # Всегда пробуем запрос. Даже если IP кажется "странным".
     url = f"https://ipapi.co/{ip}/json/"
 
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "cis-checker/1.0"})
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "cis-checker/1.0"},
+        )
         with urllib.request.urlopen(req, timeout=5.0) as resp:
             if resp.status != 200:
                 return None
-            data = json.loads(resp.read().decode("utf-8", errors="ignore"))
+            data = json.loads(
+                resp.read().decode("utf-8", errors="ignore")
+            )
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError):
         return None
 
