@@ -40,7 +40,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 # ---------- ИНИЦИАЛИЗАЦИЯ БД ----------
 
 def init_db() -> None:
@@ -94,10 +93,7 @@ async def get_country_by_ip(ip: Optional[str]) -> Optional[str]:
     if not ip:
         return None
 
-    # Локальный/служебный IP — смысла проверять нет
-    if ip.startswith("127.") or ip.startswith("10.") or ip.startswith("192.168."):
-        return None
-
+    # Больше НЕ пропускаем локальные IP — всегда пытаемся узнать страну
     url = f"https://ipapi.co/{ip}/json/"
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
@@ -192,6 +188,7 @@ async def index(request: Request, uid: Optional[int] = Query(None)):
     if country is not None:
         is_cis = country in CIS_COUNTRIES
 
+    # Даже если country = None, мы всё равно сохраняем IP и факт попытки проверки
     if uid is not None:
         save_result(uid, ip, country, is_cis)
 
