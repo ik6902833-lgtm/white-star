@@ -1517,6 +1517,21 @@ async def rating_callbacks(callback: types.CallbackQuery):
 # ================== ОЦЕНКА РИСКОВ (по приглашённым) ==================
 
 async def evaluate_risks_for_referrer(referrer_id: int) -> str:
+    """
+    Новый формат:
+    🧮 Оценка риска выплат по рефералам пользователя 7336263667
+
+    Всего приглашённых: 4
+    Без аватара: 2 (50.0%)
+    Молодые ID (>7500000000): 2 (50.0%)
+    Не СНГ язык: 4 (100.0%)
+    Совпадает имя с реферером: 0 (0.0%)
+    Premium аккаунтов: 0 (0.0%)
+
+    Итоговый уровень риска: 🟡 Средний
+    (учитываются только рефералы пользователя: аватар, язык, возраст ID, премка и совпадение имени)
+    """
+    # Берём только рефералов, по которым уже была выдана награда
     cursor.execute(
         "SELECT referred_id FROM referral_rewards WHERE referrer_id=? AND rewarded=1",
         (referrer_id,),
@@ -1524,114 +1539,125 @@ async def evaluate_risks_for_referrer(referrer_id: int) -> str:
     rows = cursor.fetchall() or []
     if not rows:
         return (
-            f"🧪 Оценка рисков по пользователю {referrer_id}\n"
+            f"🧮 Оценка риска выплат по рефералам пользователя {referrer_id}\n\n"
             "У этого пользователя ещё нет приглашённых с наградой — риск минимальный."
         )
 
     referred_ids = [int(r[0]) for r in rows if r and r[0]]
     total = len(referred_ids)
 
-    non_cis = 0
-    unknown_cis = 0
+    # Счётчики
     no_avatar = 0
     young_acc = 0
+    non_cis_lang = 0  # фактически по результатам сайта (is_cis=False)
+    same_name = 0
     premium_count = 0
-    same_country = 0
 
-    ref_cis_data = await fetch_cis_status(referrer_id)
-    ref_country = ref_cis_data.get("country") if ref_cis_data else None
+    # Имя реферера
+    try:
+        ref_chat = await bot.get_chat(referrer_id)
+        ref_name = f"{ref_chat.first_name or ''} {ref_chat.last_name or ''}".strip().lower()
+    except Exception:
+        ref_name = ""
 
+    # Проходим по всем приглашённым
     for idx, rid in enumerate(referred_ids, start=1):
+        # Проверка через сайт (берём is_cis)
         data = await fetch_cis_status(rid)
         if data and data.get("checked"):
             is_cis = data.get("is_cis")
-            country = data.get("country")
+            # Для строки "Не СНГ язык" считаем всех, у кого is_cis == False
             if is_cis is False:
-                non_cis += 1
-            if is_cis is None:
-                unknown_cis += 1
-            if country and ref_country and country == ref_country:
-                same_country += 1
+                non_cis_lang += 1
         else:
-            unknown_cis += 1
+            # Если запись не найдена / не проверен — считаем как не СНГ (консервативно)
+            non_cis_lang += 1
 
+        # Чат пользователя
+        try:
+            chat = await bot.get_chat(rid)
+        except Exception:
+            chat = None
+
+        # Аватар
         try:
             photos = await bot.get_user_profile_photos(rid, limit=1)
             if photos.total_count == 0:
                 no_avatar += 1
         except Exception:
+            # Если не смогли получить — не трогаем счётчик
             pass
 
+        # Молодые ID
+        if rid >= YOUNG_ACCOUNT_THRESHOLD:
+            young_acc += 1
+
+        # Premium
         try:
-            chat = await bot.get_chat(rid)
-            if getattr(chat, "is_premium", False):
+            if chat and getattr(chat, "is_premium", False):
                 premium_count += 1
         except Exception:
             pass
 
-        if rid >= YOUNG_ACCOUNT_THRESHOLD:
-            young_acc += 1
+        # Совпадение имени с реферером
+        try:
+            if chat:
+                nm = f"{chat.first_name or ''} {chat.last_name or ''}".strip().lower()
+                if ref_name and nm and nm == ref_name:
+                    same_name += 1
+        except Exception:
+            pass
 
+        # Чуть притормаживаем, чтобы не упереться в лимиты Telegram / сайта
         if idx % 10 == 0:
             await asyncio.sleep(0.2)
 
     def pct(x: int) -> float:
         return round(x * 100 / total, 1) if total else 0.0
 
-    risk_parts = []
-    overall_score = 0
+    # Считаем общий балл риска
+    risk_score = 0
 
-    if non_cis:
-        risk_parts.append(
-            f"❗ Неподходящая страна по проверке сайта: {non_cis} из {total} ({pct(non_cis)}%)."
-        )
-        overall_score += 2 if pct(non_cis) >= 30 else 1
+    if pct(no_avatar) >= 50:
+        risk_score += 1
+    if pct(young_acc) >= 50:
+        risk_score += 1
+    if pct(non_cis_lang) >= 50:
+        risk_score += 1
+    if pct(same_name) >= 20:
+        # много клонов с тем же именем
+        risk_score += 1
 
-    if unknown_cis:
-        risk_parts.append(
-            f"❓ Не удалось определить страну для {unknown_cis} из {total} приглашённых."
-        )
-        if pct(unknown_cis) >= 50:
-            overall_score += 1
+    # Premium — наоборот, чуть снижает риск, если их заметно много,
+    # но ниже нуля не опускаем
+    if pct(premium_count) >= 30 and risk_score > 0:
+        risk_score -= 1
 
-    if no_avatar:
-        risk_parts.append(
-            f"🙈 Без аватарки: {no_avatar} из {total} ({pct(no_avatar)}%)."
-        )
-        if pct(no_avatar) >= 60:
-            overall_score += 1
-
-    if young_acc:
-        risk_parts.append(
-            f"🆕 Очень новые аккаунты: {young_acc} из {total} ({pct(young_acc)}%)."
-        )
-        if pct(young_acc) >= 40:
-            overall_score += 1
-
-    if premium_count:
-        risk_parts.append(
-            f"⭐ Premium-аккаунтов среди приглашённых: {premium_count} из {total} ({pct(premium_count)}%). Это скорее плюс."
-        )
-
-    if same_country and ref_country:
-        risk_parts.append(
-            f"🌍 Совпадение страны с пригласившим ({ref_country}) у {same_country} из {total} приглашённых."
-        )
-
-    if overall_score <= 1:
-        level = "низкий"
-    elif overall_score == 2:
-        level = "средний"
+    # Определяем уровень риска
+    if risk_score <= 1:
+        level_emoji = "🟢"
+        level_text = "Низкий"
+    elif risk_score == 2:
+        level_emoji = "🟡"
+        level_text = "Средний"
     else:
-        level = "высокий"
+        level_emoji = "🔴"
+        level_text = "Высокий"
 
     header = (
-        f"🧪 Оценка рисков по пользователю {referrer_id}\n"
-        f"Всего приглашённых с наградой: {total}\n"
-        f"Общий уровень риска: {level.upper()}.\n\n"
+        f"🧮 Оценка риска выплат по рефералам пользователя {referrer_id}\n\n"
     )
-    details = "\n".join(risk_parts) if risk_parts else "Явных факторов риска не обнаружено."
-    return header + details
+    body = (
+        f"Всего приглашённых: {total}\n"
+        f"Без аватара: {no_avatar} ({pct(no_avatar)}%)\n"
+        f"Молодые ID (>7500000000): {young_acc} ({pct(young_acc)}%)\n"
+        f"Не СНГ язык: {non_cis_lang} ({pct(non_cis_lang)}%)\n"
+        f"Совпадает имя с реферером: {same_name} ({pct(same_name)}%)\n"
+        f"Premium аккаунтов: {premium_count} ({pct(premium_count)}%)\n\n"
+        f"Итоговый уровень риска: {level_emoji} {level_text}\n"
+        "(учитываются только рефералы пользователя: аватар, язык, возраст ID, премка и совпадение имени)"
+    )
+    return header + body
 
 # ================== АДМИН ПОШАГОВЫЕ ДИАЛОГИ ==================
 
@@ -1678,7 +1704,7 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
                 sample_message_id = state.get("sample_message_id")
                 admin_actions.pop(uid, None)
                 await safe_answer_message(
-                    message, "🚀 Запускаю рассылку…", reply_markup=admin_menu_kb()
+                    message, "🚀 Запускаю рассылку…", reply_markup=admin_menu_kб(),
                 )
                 await do_broadcast(uid, sample_chat_id, sample_message_id)
                 return True
@@ -1871,7 +1897,7 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
             await safe_answer_message(
                 message,
                 f"💳 Ок. Сколько ⭐️ начислить пользователю {target_id}? Напишите число. («отмена» для выхода)",
-                reply_markup=admin_menu_kb(),
+                reply_markup=admin_menu_kб(),
             )
             return True
 
@@ -2098,7 +2124,7 @@ async def withdraw_confirm_handlers(callback: types.CallbackQuery):
         amount = float(state["pending_amount"])
         to_username = state["pending_username"]
 
-        cursor.execute("SELECT balance FROM users WHERE user_id=?", (user_id,))
+        cursor.execute("SELECT balance FROM users WHERE user_id=?", (user_id,)),
         r = cursor.fetchone()
         balance = float(r[0]) if r and r[0] is not None else 0.0
         if amount > balance:
@@ -2394,7 +2420,7 @@ async def main_menu_handler(message: types.Message):
         admin_actions[uid] = {"mode": "risk", "await": "user"}
         await safe_answer_message(
             message,
-            "🧪 Оценка рисков.\nПришлите @username или user_id пользователя, для которого нужно оценить риски по его приглашённым.",
+            "🧮 Оценка риска выплат по рефералам.\nПришлите @username или user_id пользователя, для которого нужно оценить риски по его приглашённым.",
             reply_markup=admin_menu_kb(),
         )
         return
@@ -2694,7 +2720,6 @@ async def main_menu_handler(message: types.Message):
             )
 
         elif text == "Информация📚":
-            # просто короткая инфа (можно заменить на нужную)
             info_text = (
                 "<b>Информация о боте:</b>\n\n"
                 "Здесь будет общая статистика / описание, по желанию."
