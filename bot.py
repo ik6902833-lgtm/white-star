@@ -1518,18 +1518,19 @@ async def rating_callbacks(callback: types.CallbackQuery):
 
 async def evaluate_risks_for_referrer(referrer_id: int) -> str:
     """
-    Новый формат:
+    Формат отчёта:
+
     🧮 Оценка риска выплат по рефералам пользователя 7336263667
 
     Всего приглашённых: 4
     Без аватара: 2 (50.0%)
     Молодые ID (>7500000000): 2 (50.0%)
-    Не СНГ язык: 4 (100.0%)
+    Не СНГ по IP (с сайта): 4 (100.0%)
     Совпадает имя с реферером: 0 (0.0%)
     Premium аккаунтов: 0 (0.0%)
 
     Итоговый уровень риска: 🟡 Средний
-    (учитываются только рефералы пользователя: аватар, язык, возраст ID, премка и совпадение имени)
+    (учитываются только рефералы пользователя: аватар, данные по IP с сайта, возраст ID, премка и совпадение имени)
     """
     # Берём только рефералов, по которым уже была выдана награда
     cursor.execute(
@@ -1549,7 +1550,7 @@ async def evaluate_risks_for_referrer(referrer_id: int) -> str:
     # Счётчики
     no_avatar = 0
     young_acc = 0
-    non_cis_lang = 0  # фактически по результатам сайта (is_cis=False)
+    non_cis_ip = 0   # НЕ СНГ по IP (из ответа сайта)
     same_name = 0
     premium_count = 0
 
@@ -1566,12 +1567,12 @@ async def evaluate_risks_for_referrer(referrer_id: int) -> str:
         data = await fetch_cis_status(rid)
         if data and data.get("checked"):
             is_cis = data.get("is_cis")
-            # Для строки "Не СНГ язык" считаем всех, у кого is_cis == False
+            # считаем тех, у кого сайт говорит, что не СНГ
             if is_cis is False:
-                non_cis_lang += 1
+                non_cis_ip += 1
         else:
             # Если запись не найдена / не проверен — считаем как не СНГ (консервативно)
-            non_cis_lang += 1
+            non_cis_ip += 1
 
         # Чат пользователя
         try:
@@ -1622,7 +1623,7 @@ async def evaluate_risks_for_referrer(referrer_id: int) -> str:
         risk_score += 1
     if pct(young_acc) >= 50:
         risk_score += 1
-    if pct(non_cis_lang) >= 50:
+    if pct(non_cis_ip) >= 50:
         risk_score += 1
     if pct(same_name) >= 20:
         # много клонов с тем же именем
@@ -1651,11 +1652,11 @@ async def evaluate_risks_for_referrer(referrer_id: int) -> str:
         f"Всего приглашённых: {total}\n"
         f"Без аватара: {no_avatar} ({pct(no_avatar)}%)\n"
         f"Молодые ID (>7500000000): {young_acc} ({pct(young_acc)}%)\n"
-        f"Не СНГ язык: {non_cis_lang} ({pct(non_cis_lang)}%)\n"
+        f"Не СНГ по IP (с сайта): {non_cis_ip} ({pct(non_cis_ip)}%)\n"
         f"Совпадает имя с реферером: {same_name} ({pct(same_name)}%)\n"
         f"Premium аккаунтов: {premium_count} ({pct(premium_count)}%)\n\n"
         f"Итоговый уровень риска: {level_emoji} {level_text}\n"
-        "(учитываются только рефералы пользователя: аватар, язык, возраст ID, премка и совпадение имени)"
+        "(учитываются только рефералы пользователя: аватар, данные по IP с сайта, возраст ID, премка и совпадение имени)"
     )
     return header + body
 
@@ -1704,7 +1705,7 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
                 sample_message_id = state.get("sample_message_id")
                 admin_actions.pop(uid, None)
                 await safe_answer_message(
-                    message, "🚀 Запускаю рассылку…", reply_markup=admin_menu_kб(),
+                    message, "🚀 Запускаю рассылку…", reply_markup=admin_menu_kb()
                 )
                 await do_broadcast(uid, sample_chat_id, sample_message_id)
                 return True
@@ -1771,7 +1772,7 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
                 await safe_answer_message(
                     message,
                     "❗ Введите целое число использований (например: 5).",
-                    reply_markup=admin_menu_kb(),
+                    reply_markup=admin_menu_kк(),
                 )
                 return True
             if max_uses <= 0:
@@ -1897,7 +1898,7 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
             await safe_answer_message(
                 message,
                 f"💳 Ок. Сколько ⭐️ начислить пользователю {target_id}? Напишите число. («отмена» для выхода)",
-                reply_markup=admin_menu_kб(),
+                reply_markup=admin_menu_kb(),
             )
             return True
 
@@ -2124,7 +2125,7 @@ async def withdraw_confirm_handlers(callback: types.CallbackQuery):
         amount = float(state["pending_amount"])
         to_username = state["pending_username"]
 
-        cursor.execute("SELECT balance FROM users WHERE user_id=?", (user_id,)),
+        cursor.execute("SELECT balance FROM users WHERE user_id=?", (user_id,))]
         r = cursor.fetchone()
         balance = float(r[0]) if r and r[0] is not None else 0.0
         if amount > balance:
@@ -2420,7 +2421,7 @@ async def main_menu_handler(message: types.Message):
         admin_actions[uid] = {"mode": "risk", "await": "user"}
         await safe_answer_message(
             message,
-            "🧮 Оценка риска выплат по рефералам.\nПришлите @username или user_id пользователя, для которого нужно оценить риски по его приглашённым.",
+            "🧪 Оценка рисков.\nПришлите @username или user_id пользователя, для которого нужно оценить риски по его приглашённым.",
             reply_markup=admin_menu_kb(),
         )
         return
