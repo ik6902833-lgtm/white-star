@@ -1,7 +1,8 @@
+# cis_webapp/main.py
 import os
 import sqlite3
 import datetime
-from typing import Optional
+from typing import Optional, Dict, Any
 import json
 import urllib.request
 import urllib.error
@@ -10,14 +11,16 @@ from fastapi import FastAPI, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 
-# Базовая папка этого модуля
+# ================== НАСТРОЙКИ ==================
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Путь к БД с результатами проверки
-# По умолчанию кладём БД рядом с main.py, чтобы не было проблем с правами на /data
+# БД кладём рядом с main.py по умолчанию
 DB_PATH = os.getenv("CIS_DB_PATH", os.path.join(BASE_DIR, "cis_checks.db"))
 
-# Список стран СНГ / ближнего зарубежья по ISO-кодам
+INDEX_PATH = os.path.join(BASE_DIR, "index.html")
+
+# СНГ / ближнее зарубежье (включая Украину)
 CIS_COUNTRIES = {
     "RU",  # Россия
     "UA",  # Украина
@@ -33,11 +36,24 @@ CIS_COUNTRIES = {
     "TM",  # Туркменистан
 }
 
-INDEX_PATH = os.path.join(BASE_DIR, "index.html")
+# ISO numeric (на случай если боту удобнее проверять цифрой)
+ISO_NUMERIC = {
+    "UA": "804",
+    "RU": "643",
+    "BY": "112",
+    "KZ": "398",
+    "KG": "417",
+    "MD": "498",
+    "AM": "051",
+    "AZ": "031",
+    "TJ": "762",
+    "TM": "795",
+    "UZ": "860",
+    "GE": "268",
+}
 
 app = FastAPI(title="CIS WebApp Checker")
 
-# Разрешаем CORS на всякий случай (если будешь вызывать из фронта)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -45,22 +61,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------- ИНИЦИАЛИЗАЦИЯ БД ----------
+# ================== БАЗА ДАННЫХ ==================
 
 def init_db() -> None:
-    """
-    Создаём SQLite-базу в DB_PATH (папка уже существует, т.к. это BASE_DIR).
-    """
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS cis_checks (
-            user_id    INTEGER PRIMARY KEY,
-            ip         TEXT,
-            country    TEXT,
-            is_cis     INTEGER,      -- 1 = да, 0 = нет, -1 = неизвестно
-            checked_at TEXT
+            user_id              INTEGER PRIMARY KEY,
+            ip                   TEXT,
+            country_code         TEXT,
+            country_name         TEXT,
+            country_code_numeric TEXT,
+            is_cis               INTEGER,      -- 1 = да, 0 = нет, -1 = неизвестно
+            checked_at           TEXT,
+            raw_json             TEXT
         )
         """
     )
@@ -68,75 +84,109 @@ def init_db() -> None:
     conn.close()
 
 
+def ensure_column(table: str, column: str, ddl: str) -> None:
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(f"PRAGMA table_info({table})")
+    cols = [r[1] for r in cur.fetchall()]
+    if column not in cols:
+        try:
+            cur.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+            conn.commit()
+        except Exception:
+            pass
+    conn.close()
+
+
 @app.on_event("startup")
 def on_startup() -> None:
     init_db()
+    # миграции на случай старой базы
+    ensure_column("cis_checks", "country_code", "country_code TEXT")
+    ensure_column("cis_checks", "country_name", "country_name TEXT")
+    ensure_column("cis_checks", "country_code_numeric", "country_code_numeric TEXT")
+    ensure_column("cis_checks", "raw_json", "raw_json TEXT")
 
-# ---------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ----------
+
+# ================== ВСПОМОГАТЕЛЬНОЕ ==================
 
 def get_client_ip(request: Request) -> Optional[str]:
     """
-    Вытаскиваем IP пользователя с учётом прокси Render (X-Forwarded-For).
-    НИЧЕГО не режем — всегда возвращаем то, что есть.
+    Берём IP с учётом прокси (Render/CF и т.п.).
+    Ничего не “обрезаем” кроме списка XFF — берём первый.
     """
-    xff = (
-        request.headers.get("x-forwarded-for")
-        or request.headers.get("X-Forwarded-For")
-    )
-    if xff:
-        # может быть "ip1, ip2, ip3"
-        return xff.split(",")[0].strip()
+    headers = request.headers
+
+    for key in (
+        "cf-connecting-ip",
+        "true-client-ip",
+        "x-real-ip",
+        "x-forwarded-for",
+        "X-Forwarded-For",
+    ):
+        v = headers.get(key)
+        if v:
+            # может быть "ip1, ip2, ip3"
+            return v.split(",")[0].strip()
 
     if request.client:
         return request.client.host
-
     return None
 
 
-def get_country_by_ip(ip: Optional[str]) -> Optional[str]:
+def fetch_geo_by_ip(ip: Optional[str]) -> Optional[Dict[str, Any]]:
     """
-    Определяем страну по IP через внешний сервис.
-    Используем https://ipapi.co/{ip}/json/ и НИЧЕГО не режем,
-    чтобы по-любому попытаться получить страну.
+    Определяем страну через ipapi.co
+    - если ip есть: https://ipapi.co/{ip}/json/
+    - если ip нет: https://ipapi.co/json/
     """
-    if not ip:
-        return None
-
-    url = f"https://ipapi.co/{ip}/json/"
+    url = f"https://ipapi.co/{ip}/json/" if ip else "https://ipapi.co/json/"
 
     try:
-        req = urllib.request.Request(
-            url,
-            headers={"User-Agent": "cis-checker/1.0"},
-        )
-        with urllib.request.urlopen(req, timeout=5.0) as resp:
-            if resp.status != 200:
+        req = urllib.request.Request(url, headers={"User-Agent": "cis-checker/2.0"})
+        with urllib.request.urlopen(req, timeout=6.0) as resp:
+            if getattr(resp, "status", 200) != 200:
                 return None
-            data = json.loads(
-                resp.read().decode("utf-8", errors="ignore")
-            )
+            raw = resp.read().decode("utf-8", errors="ignore")
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                return data
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError):
         return None
+    except Exception:
+        return None
 
-    code = data.get("country_code")
-    if isinstance(code, str) and len(code) == 2:
-        return code.upper()
     return None
+
+
+def normalize_country_code(code: Optional[str]) -> Optional[str]:
+    if not code:
+        return None
+    s = str(code).strip().upper()
+    if len(s) == 2:
+        return s
+    # иногда сервисы отдают "UKR" — приведём к UA
+    if s == "UKR":
+        return "UA"
+    return None
+
+
+def compute_country_numeric(code: Optional[str]) -> Optional[str]:
+    if not code:
+        return None
+    code = code.upper()
+    return ISO_NUMERIC.get(code)
 
 
 def save_result(
     user_id: int,
     ip: Optional[str],
-    country: Optional[str],
+    country_code: Optional[str],
+    country_name: Optional[str],
+    country_numeric: Optional[str],
     is_cis: Optional[bool],
+    raw_json: Optional[dict],
 ) -> None:
-    """
-    Сохраняем результат проверки в БД.
-    is_cis:
-      True  -> 1
-      False -> 0
-      None  -> -1 (не удалось определить)
-    """
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
@@ -149,20 +199,29 @@ def save_result(
 
     cur.execute(
         """
-        INSERT INTO cis_checks(user_id, ip, country, is_cis, checked_at)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO cis_checks(
+            user_id, ip, country_code, country_name, country_code_numeric,
+            is_cis, checked_at, raw_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(user_id) DO UPDATE SET
-            ip         = excluded.ip,
-            country    = excluded.country,
-            is_cis     = excluded.is_cis,
-            checked_at = excluded.checked_at
+            ip                   = excluded.ip,
+            country_code          = excluded.country_code,
+            country_name          = excluded.country_name,
+            country_code_numeric  = excluded.country_code_numeric,
+            is_cis                = excluded.is_cis,
+            checked_at            = excluded.checked_at,
+            raw_json              = excluded.raw_json
         """,
         (
-            user_id,
+            int(user_id),
             ip or "",
-            country or "",
+            country_code or "",
+            country_name or "",
+            country_numeric or "",
             is_cis_val,
             datetime.datetime.utcnow().isoformat(),
+            json.dumps(raw_json, ensure_ascii=False) if raw_json else "",
         ),
     )
     conn.commit()
@@ -170,73 +229,90 @@ def save_result(
 
 
 def load_status(user_id: int):
-    """
-    Возвращает кортеж (ip, country, is_cis, checked_at) или None, если записи нет.
-    """
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute(
-        "SELECT ip, country, is_cis, checked_at FROM cis_checks WHERE user_id=?",
-        (user_id,),
+        """
+        SELECT
+            ip, country_code, country_name, country_code_numeric,
+            is_cis, checked_at, raw_json
+        FROM cis_checks
+        WHERE user_id=?
+        """,
+        (int(user_id),),
     )
     row = cur.fetchone()
     conn.close()
     return row
 
-# ---------- РОУТЫ ----------
+
+# ================== РОУТЫ ==================
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request, uid: Optional[int] = Query(None)):
     """
-    Главная страница проверки.
-    * uid — ID пользователя Телеграма, который передаёт бот (персональная ссылка).
-    * По IP определяем страну, считаем is_cis и сохраняем в БД.
-    * Возвращаем твой статический index.html (чёрный фон, надпись и т.д.).
+    Страница проверки:
+    - берём IP
+    - запрашиваем geo
+    - вычисляем is_cis
+    - сохраняем в БД по uid (если uid передан)
+    - возвращаем index.html
     """
-
     ip = get_client_ip(request)
-    country = get_country_by_ip(ip)
-    is_cis = None
+    geo = fetch_geo_by_ip(ip)
 
-    if country is not None:
-        is_cis = country in CIS_COUNTRIES
+    country_code = None
+    country_name = None
+    country_numeric = None
+    is_cis: Optional[bool] = None
+
+    if geo:
+        country_code = normalize_country_code(geo.get("country_code") or geo.get("country"))
+        country_name = (geo.get("country_name") or geo.get("country") or "").strip() or None
+        country_numeric = compute_country_numeric(country_code) or None
+
+        if country_code is not None:
+            is_cis = country_code in CIS_COUNTRIES
+        else:
+            is_cis = None
 
     if uid is not None:
-        # ВСЕГДА сохраняем IP и то, что удалось определить по стране
-        save_result(uid, ip, country, is_cis)
+        save_result(
+            user_id=int(uid),
+            ip=ip,
+            country_code=country_code,
+            country_name=country_name,
+            country_numeric=country_numeric,
+            is_cis=is_cis,
+            raw_json=geo,
+        )
 
-    # Отдаём твой index.html, если он есть
     if os.path.exists(INDEX_PATH):
         with open(INDEX_PATH, "r", encoding="utf-8") as f:
-            html_content = f.read()
-        return HTMLResponse(content=html_content)
+            return HTMLResponse(content=f.read())
 
-    # Запасной вариант, если файла нет
-    fallback_html = """
-    <html>
-      <head>
-        <meta charset="utf-8" />
-        <title>Проверено</title>
-        <style>
-          body {
-            margin: 0;
-            padding: 0;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            height: 100vh;
-            background-color: #000000;
-            color: #ffffff;
-            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-          }
-        </style>
-      </head>
-      <body>
-        <h1>Проверено, перейдите в бота для дальнейших действий</h1>
-      </body>
-    </html>
-    """
-    return HTMLResponse(content=fallback_html)
+    return HTMLResponse(
+        content="""
+        <html>
+          <head>
+            <meta charset="utf-8" />
+            <title>Проверено</title>
+            <style>
+              body {
+                margin: 0; padding: 0;
+                display: flex; align-items: center; justify-content: center;
+                height: 100vh; background: #000; color: #fff;
+                font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+                text-align: center;
+              }
+            </style>
+          </head>
+          <body>
+            <h1>Проверено, перейдите в бота для дальнейших действий</h1>
+          </body>
+        </html>
+        """.strip()
+    )
 
 
 @app.get("/api/status/{user_id}", response_class=JSONResponse)
@@ -244,31 +320,39 @@ async def api_status(user_id: int):
     """
     Эндпоинт для бота.
 
-    Возвращает, что знаем о пользователе:
-    {
-      "user_id": 123,
-      "checked": true/false,
-      "is_cis": true/false/null,
-      "country": "UA" / "RU" / ... / null,
-      "ip": "1.2.3.4" / null,
-      "checked_at": "2025-12-12T..."
-    }
+    Чтобы твой бот 100% не путался, отдаём сразу несколько “синонимов” полей:
+      - checked (bool)
+      - is_cis (bool|null) + cis (bool|null)
+      - country_code + cc + iso
+      - country_code_numeric (например 804)
+      - country_name + country
     """
-
     row = load_status(user_id)
     if not row:
         return JSONResponse(
             {
                 "user_id": user_id,
                 "checked": False,
+
                 "is_cis": None,
+                "cis": None,
+
+                "country_code": None,
+                "cc": None,
+                "iso": None,
+
+                "country_code_numeric": None,
+                "numeric": None,
+
+                "country_name": None,
                 "country": None,
+
                 "ip": None,
                 "checked_at": None,
             }
         )
 
-    ip, country, is_cis_val, checked_at = row
+    ip, country_code, country_name, country_numeric, is_cis_val, checked_at, raw_json = row
 
     if is_cis_val == 1:
         is_cis = True
@@ -277,12 +361,31 @@ async def api_status(user_id: int):
     else:
         is_cis = None
 
+    cc = country_code or None
+    cn = country_name or None
+    num = country_numeric or None
+
+    # raw_json можно не отдавать (чтобы не раздувать ответ), но можно включить при отладке
+    # raw = json.loads(raw_json) if raw_json else None
+
     return JSONResponse(
         {
             "user_id": user_id,
             "checked": True,
+
             "is_cis": is_cis,
-            "country": country or None,
+            "cis": is_cis,
+
+            "country_code": cc,
+            "cc": cc,
+            "iso": cc,
+
+            "country_code_numeric": num,
+            "numeric": num,
+
+            "country_name": cn,
+            "country": cn if cn else cc,  # иногда боту удобнее получить хоть что-то
+
             "ip": ip or None,
             "checked_at": checked_at,
         }
