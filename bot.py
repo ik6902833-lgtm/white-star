@@ -215,10 +215,8 @@ def _qwarn(msg: str):
     if not QUIET_LOGGING:
         print(msg)
 
-
 def now_kyiv() -> datetime:
     return datetime.now(timezone(timedelta(hours=3)))
-
 
 async def safe_send_message(chat_id: int, text: str, **kwargs):
     try:
@@ -229,7 +227,6 @@ async def safe_send_message(chat_id: int, text: str, **kwargs):
         _qwarn(f"[WARN] send_message failed: {type(e).__name__}")
         return None
 
-
 async def safe_answer_message(message: types.Message, text: str, **kwargs):
     try:
         return await message.answer(text, **kwargs)
@@ -239,7 +236,6 @@ async def safe_answer_message(message: types.Message, text: str, **kwargs):
         _qwarn(f"[WARN] message.answer failed: {type(e).__name__}")
         return None
 
-
 async def safe_edit_text(message: types.Message, new_text: str, **kwargs):
     try:
         return await message.edit_text(new_text, **kwargs)
@@ -248,7 +244,6 @@ async def safe_edit_text(message: types.Message, new_text: str, **kwargs):
     except Exception as e:
         _qwarn(f"[WARN] edit_text failed: {type(e).__name__}")
         return None
-
 
 async def send_photo_caption(chat_id: int, image_path: str, caption: str,
                              reply_markup=None, parse_mode: str = "HTML"):
@@ -274,7 +269,6 @@ async def send_photo_caption(chat_id: int, image_path: str, caption: str,
             chat_id, caption, reply_markup=reply_markup, parse_mode=parse_mode
         )
 
-
 def normalize_chat_target(target):
     if isinstance(target, int):
         return target
@@ -298,7 +292,6 @@ def normalize_chat_target(target):
         return alias if alias.startswith("@") else ("@" + alias if alias else s)
     return s if s.startswith("@") else "@" + s
 
-
 def make_tg_url(link: str | None) -> str | None:
     if not link:
         return None
@@ -311,14 +304,12 @@ def make_tg_url(link: str | None) -> str | None:
         return s
     return s
 
-
 async def notify_admin_channel(text: str):
     chat = normalize_chat_target(NEW_ADMIN_CHANNEL)
     try:
         await bot.send_message(chat, text, parse_mode="HTML")
     except Exception as e:
         _qwarn(f"[WARN] notify_admin_channel failed: {type(e).__name__}")
-
 
 async def resolve_username_display(user_id: int) -> str:
     try:
@@ -344,7 +335,6 @@ async def resolve_username_display(user_id: int) -> str:
     except Exception:
         return "—"
 
-
 def main_menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -356,13 +346,11 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
         resize_keyboard=True,
     )
 
-
 def back_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="Назад")]],
         resize_keyboard=True,
     )
-
 
 def profile_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
@@ -372,7 +360,6 @@ def profile_keyboard() -> ReplyKeyboardMarkup:
         ],
         resize_keyboard=True,
     )
-
 
 def rating_keyboard_single_for(current_timeframe: str) -> InlineKeyboardMarkup:
     if current_timeframe == "24h":
@@ -388,7 +375,6 @@ def rating_keyboard_single_for(current_timeframe: str) -> InlineKeyboardMarkup:
             ]
         )
 
-
 def withdraw_amount_confirm_kb(user_id: int, amount: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -401,7 +387,6 @@ def withdraw_amount_confirm_kb(user_id: int, amount: int) -> InlineKeyboardMarku
             ]
         ]
     )
-
 
 def withdraw_final_confirm_kb(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -419,7 +404,6 @@ def withdraw_final_confirm_kb(user_id: int) -> InlineKeyboardMarkup:
         ]
     )
 
-
 def admin_withdraw_kb(withdraw_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -433,7 +417,6 @@ def admin_withdraw_kb(withdraw_id: int) -> InlineKeyboardMarkup:
             ]
         ]
     )
-
 
 def admin_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
@@ -451,7 +434,6 @@ def admin_menu_kb() -> ReplyKeyboardMarkup:
         resize_keyboard=True,
     )
 
-
 def broadcast_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -460,7 +442,6 @@ def broadcast_keyboard() -> InlineKeyboardMarkup:
         ]
     )
 
-
 def normalize_username(u: str) -> str:
     u = (u or "").strip()
     if not u:
@@ -468,7 +449,6 @@ def normalize_username(u: str) -> str:
     if u.startswith("@"):
         u = u[1:]
     return u.lower()
-
 
 def fetch_user_by_username(uname: str):
     uname_norm = normalize_username(uname)
@@ -480,11 +460,9 @@ def fetch_user_by_username(uname: str):
     )
     return cursor.fetchone()
 
-
 def fetch_user_by_id(uid: int):
     cursor.execute("SELECT user_id, username FROM users WHERE user_id=?", (uid,))
     return cursor.fetchone()
-
 
 def parse_user_ref(text: str):
     t = (text or "").strip()
@@ -504,7 +482,6 @@ def parse_user_ref(text: str):
         return int(row[0]), row[1]
     return None, None
 
-
 async def is_channel_admin(user_id: int, channel_id) -> bool:
     try:
         member = await bot.get_chat_member(chat_id=channel_id, user_id=user_id)
@@ -512,14 +489,12 @@ async def is_channel_admin(user_id: int, channel_id) -> bool:
     except Exception:
         return False
 
-
 async def has_admin_access(user_id: int) -> bool:
     if user_id in admin_sessions:
         return True
     if await is_channel_admin(user_id, CHANNEL_FOR_WITHDRAW):
         return True
     return False
-
 
 def set_referral_reward(new_value: int):
     global REFERRAL_REWARD
@@ -535,6 +510,36 @@ def set_referral_reward(new_value: int):
 
 # ================== СНГ-ПРОВЕРКА ЧЕРЕЗ САЙТ ==================
 
+def is_country_allowed_from_api(data: dict | None) -> bool:
+    """
+    Разрешаем:
+    - если API говорит is_cis=True
+    - ИЛИ если страна = Украина (любыми распространёнными ключами/значениями)
+    """
+    if not data:
+        return False
+
+    if data.get("is_cis") is True:
+        return True
+
+    # пробуем разные возможные ключи
+    cc = str(data.get("country_code") or data.get("cc") or data.get("code") or "").strip().upper()
+    if cc in ("UA", "UKR"):
+        return True
+
+    cname = str(
+        data.get("country")
+        or data.get("country_name")
+        or data.get("name")
+        or data.get("ip_country")
+        or ""
+    ).strip().lower()
+
+    if cname in ("ukraine", "украина", "україна"):
+        return True
+
+    return False
+
 async def fetch_cis_status(user_id: int):
     url = f"{CIS_API_STATUS_URL}/{user_id}"
     try:
@@ -548,7 +553,6 @@ async def fetch_cis_status(user_id: int):
     except Exception as e:
         _qwarn(f"[WARN] CIS status request failed: {type(e).__name__}")
         return None
-
 
 async def ensure_cis_access(user_id: int, carrier) -> bool:
     """
@@ -603,7 +607,6 @@ async def ensure_cis_access(user_id: int, carrier) -> bool:
     )
     return False
 
-
 @dp.callback_query(lambda c: c.data == "cis_check_done")
 async def cis_check_done_callback(callback: types.CallbackQuery):
     user_id = callback.from_user.id
@@ -616,8 +619,9 @@ async def cis_check_done_callback(callback: types.CallbackQuery):
         )
         return
 
-    is_cis = data.get("is_cis")
-    cis_ok_val = 1 if is_cis else 0
+    # ✅ Украина тоже считается «проходимой» (без изменения надписей)
+    allowed = is_country_allowed_from_api(data)
+    cis_ok_val = 1 if allowed else 0
 
     try:
         cursor.execute(
@@ -690,7 +694,6 @@ async def gather_manual_sponsors(user_id: int):
 
     return required_missing, optional_links
 
-
 async def process_manual_sponsors(user: types.User, chat_id: int) -> bool:
     required_missing, optional_links = await gather_manual_sponsors(user.id)
     if not required_missing:
@@ -725,7 +728,6 @@ async def process_manual_sponsors(user: types.User, chat_id: int) -> bool:
     await bot.send_message(chat_id, text, reply_markup=kb)
     return False
 
-
 async def subgram_get_sponsors(user: types.User, chat_id: int, extra: dict | None = None):
     headers = {"Auth": SUBGRAM_API_KEY}
     payload = {
@@ -744,7 +746,6 @@ async def subgram_get_sponsors(user: types.User, chat_id: int, extra: dict | Non
         except Exception as e:
             _qwarn(f"[WARN] SubGram request failed: {type(e).__name__}")
             return None
-
 
 async def process_subgram_check(user: types.User, chat_id: int, api_kwargs: dict | None = None) -> bool:
     if api_kwargs is None:
@@ -893,7 +894,6 @@ async def ban_in_required_channels(target_user_id: int):
         except Exception as e:
             _qwarn(f"[WARN] ban_chat_member failed for {chat}: {type(e).__name__}")
 
-
 async def unban_in_required_channels(target_user_id: int):
     for open_link, check_target in SPONSORS_REQUIRED:
         chat = normalize_chat_target(check_target or open_link)
@@ -903,7 +903,6 @@ async def unban_in_required_channels(target_user_id: int):
             pass
         except Exception as e:
             _qwarn(f"[WARN] unban_chat_member failed for {chat}: {type(e).__name__}")
-
 
 async def block_user_everywhere(target_user_id: int):
     # помечаем заблокированным и обнуляем профиль
@@ -955,7 +954,6 @@ async def block_user_everywhere(target_user_id: int):
         _qwarn(f"[WARN] delete withdrawals on block failed: {type(e).__name__}")
 
     await ban_in_required_channels(target_user_id)
-
 
 async def unblock_user_everywhere(target_user_id: int):
     try:
@@ -1183,7 +1181,6 @@ async def gender_select_callback(callback: types.CallbackQuery):
     await callback.answer()
     await ensure_subscribed(user_id, callback)
 
-
 @dp.callback_query(lambda c: c.data and c.data.startswith("subgram"))
 async def subgram_callbacks(callback: types.CallbackQuery):
     try:
@@ -1233,7 +1230,6 @@ async def cmd_admin_login(message: types.Message):
         "🔑 Введите пароль для входа в админ-панель (отправьте пароль как обычное сообщение).",
     )
 
-
 @dp.message(Command("exitadmin"))
 async def cmd_exit_admin(message: types.Message):
     if message.from_user.id in admin_sessions:
@@ -1252,7 +1248,6 @@ async def cmd_exit_admin(message: types.Message):
     else:
         await safe_answer_message(message, "❌ Вы не в админ-панели.")
 
-
 @dp.message(Command("broadcast"))
 async def cmd_broadcast(message: types.Message):
     if not await has_admin_access(message.from_user.id):
@@ -1267,11 +1262,9 @@ async def cmd_broadcast(message: types.Message):
         reply_markup=admin_menu_kb(),
     )
 
-
 @dp.message(Command("myid"))
 async def cmd_myid(message: types.Message):
     await safe_answer_message(message, f"🆔 Твой user_id: {message.from_user.id}")
-
 
 @dp.message(lambda m: m.from_user.id in admin_login_states)
 async def admin_password_handler(message: types.Message):
@@ -1413,7 +1406,6 @@ def start_of_today_kyiv():
     now = now_kyiv()
     return now.replace(hour=0, minute=0, second=0, microsecond=0)
 
-
 async def build_rating_text(time_frame: str):
     cur = conn.cursor()
     if time_frame == "24h":
@@ -1462,7 +1454,6 @@ async def build_rating_text(time_frame: str):
         result += f"{i}. {full_name} — {cnt} рефералов\n"
     return result
 
-
 async def send_rating(user_id: int, time_frame: str, old_msg: types.Message | None = None):
     now_dt = datetime.now()
     last_time = last_rating_click.get(user_id)
@@ -1486,7 +1477,6 @@ async def send_rating(user_id: int, time_frame: str, old_msg: types.Message | No
         reply_markup=kb,
         parse_mode="HTML",
     )
-
 
 @dp.callback_query(lambda c: c.data in ["rating_24h", "rating_all"])
 async def rating_callbacks(callback: types.CallbackQuery):
@@ -1517,21 +1507,6 @@ async def rating_callbacks(callback: types.CallbackQuery):
 # ================== ОЦЕНКА РИСКОВ (по приглашённым) ==================
 
 async def evaluate_risks_for_referrer(referrer_id: int) -> str:
-    """
-    Новый формат:
-    🧮 Оценка риска выплат по рефералам пользователя 7336263667
-
-    Всего приглашённых: 4
-    Без аватара: 2 (50.0%)
-    Молодые ID (>7500000000): 2 (50.0%)
-    Не СНГ язык: 4 (100.0%)
-    Совпадает имя с реферером: 0 (0.0%)
-    Premium аккаунтов: 0 (0.0%)
-
-    Итоговый уровень риска: 🟡 Средний
-    (учитываются только рефералы пользователя: аватар, язык, возраст ID, премка и совпадение имени)
-    """
-    # Берём только рефералов, по которым уже была выдана награда
     cursor.execute(
         "SELECT referred_id FROM referral_rewards WHERE referrer_id=? AND rewarded=1",
         (referrer_id,),
@@ -1546,60 +1521,48 @@ async def evaluate_risks_for_referrer(referrer_id: int) -> str:
     referred_ids = [int(r[0]) for r in rows if r and r[0]]
     total = len(referred_ids)
 
-    # Счётчики
     no_avatar = 0
     young_acc = 0
-    non_cis_lang = 0  # фактически по результатам сайта (is_cis=False)
+    non_cis_ip = 0
     same_name = 0
     premium_count = 0
 
-    # Имя реферера
     try:
         ref_chat = await bot.get_chat(referrer_id)
         ref_name = f"{ref_chat.first_name or ''} {ref_chat.last_name or ''}".strip().lower()
     except Exception:
         ref_name = ""
 
-    # Проходим по всем приглашённым
     for idx, rid in enumerate(referred_ids, start=1):
-        # Проверка через сайт (берём is_cis)
         data = await fetch_cis_status(rid)
         if data and data.get("checked"):
-            is_cis = data.get("is_cis")
-            # Для строки "Не СНГ язык" считаем всех, у кого is_cis == False
-            if is_cis is False:
-                non_cis_lang += 1
+            allowed = is_country_allowed_from_api(data)  # ✅ Украина тоже считается «норм»
+            if not allowed:
+                non_cis_ip += 1
         else:
-            # Если запись не найдена / не проверен — считаем как не СНГ (консервативно)
-            non_cis_lang += 1
+            non_cis_ip += 1
 
-        # Чат пользователя
         try:
             chat = await bot.get_chat(rid)
         except Exception:
             chat = None
 
-        # Аватар
         try:
             photos = await bot.get_user_profile_photos(rid, limit=1)
             if photos.total_count == 0:
                 no_avatar += 1
         except Exception:
-            # Если не смогли получить — не трогаем счётчик
             pass
 
-        # Молодые ID
         if rid >= YOUNG_ACCOUNT_THRESHOLD:
             young_acc += 1
 
-        # Premium
         try:
             if chat and getattr(chat, "is_premium", False):
                 premium_count += 1
         except Exception:
             pass
 
-        # Совпадение имени с реферером
         try:
             if chat:
                 nm = f"{chat.first_name or ''} {chat.last_name or ''}".strip().lower()
@@ -1608,32 +1571,24 @@ async def evaluate_risks_for_referrer(referrer_id: int) -> str:
         except Exception:
             pass
 
-        # Чуть притормаживаем, чтобы не упереться в лимиты Telegram / сайта
         if idx % 10 == 0:
             await asyncio.sleep(0.2)
 
     def pct(x: int) -> float:
         return round(x * 100 / total, 1) if total else 0.0
 
-    # Считаем общий балл риска
     risk_score = 0
-
     if pct(no_avatar) >= 50:
         risk_score += 1
     if pct(young_acc) >= 50:
         risk_score += 1
-    if pct(non_cis_lang) >= 50:
+    if pct(non_cis_ip) >= 50:
         risk_score += 1
     if pct(same_name) >= 20:
-        # много клонов с тем же именем
         risk_score += 1
-
-    # Premium — наоборот, чуть снижает риск, если их заметно много,
-    # но ниже нуля не опускаем
     if pct(premium_count) >= 30 and risk_score > 0:
         risk_score -= 1
 
-    # Определяем уровень риска
     if risk_score <= 1:
         level_emoji = "🟢"
         level_text = "Низкий"
@@ -1644,18 +1599,16 @@ async def evaluate_risks_for_referrer(referrer_id: int) -> str:
         level_emoji = "🔴"
         level_text = "Высокий"
 
-    header = (
-        f"🧮 Оценка риска выплат по рефералам пользователя {referrer_id}\n\n"
-    )
+    header = f"🧮 Оценка риска выплат по рефералам пользователя {referrer_id}\n\n"
     body = (
         f"Всего приглашённых: {total}\n"
         f"Без аватара: {no_avatar} ({pct(no_avatar)}%)\n"
         f"Молодые ID (>7500000000): {young_acc} ({pct(young_acc)}%)\n"
-        f"Не СНГ язык: {non_cis_lang} ({pct(non_cis_lang)}%)\n"
+        f"Не СНГ по IP (с сайта): {non_cis_ip} ({pct(non_cis_ip)}%)\n"
         f"Совпадает имя с реферером: {same_name} ({pct(same_name)}%)\n"
         f"Premium аккаунтов: {premium_count} ({pct(premium_count)}%)\n\n"
         f"Итоговый уровень риска: {level_emoji} {level_text}\n"
-        "(учитываются только рефералы пользователя: аватар, язык, возраст ID, премка и совпадение имени)"
+        "(учитываются только рефералы пользователя: аватар, данные по IP с сайта, возраст ID, премка и совпадение имени)"
     )
     return header + body
 
@@ -1684,7 +1637,6 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
         )
         return True
 
-    # Рассылка
     if mode == "broadcast":
         if step == "sample":
             state["sample_chat_id"] = message.chat.id
@@ -1704,7 +1656,7 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
                 sample_message_id = state.get("sample_message_id")
                 admin_actions.pop(uid, None)
                 await safe_answer_message(
-                    message, "🚀 Запускаю рассылку…", reply_markup=admin_menu_kб(),
+                    message, "🚀 Запускаю рассылку…", reply_markup=admin_menu_kb()
                 )
                 await do_broadcast(uid, sample_chat_id, sample_message_id)
                 return True
@@ -1716,7 +1668,6 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
                 )
                 return True
 
-    # Изменить награду за реферала
     if mode == "set_ref_reward" and step == "value":
         try:
             new_reward = int(text_raw.strip())
@@ -1743,7 +1694,6 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
         )
         return True
 
-    # Промокоды
     if mode == "promocode_create":
         if step == "code":
             code = text_raw.strip()
@@ -1771,7 +1721,7 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
                 await safe_answer_message(
                     message,
                     "❗ Введите целое число использований (например: 5).",
-                    reply_markup=admin_menu_kb(),
+                    reply_markup=admin_menu_kb(),  # ✅ исправлено
                 )
                 return True
             if max_uses <= 0:
@@ -1832,7 +1782,6 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
             )
             return True
 
-    # Шаг "user" (для reset/toggle/grant/risk)
     if step == "user":
         target_id, target_username = parse_user_ref(text_raw)
         if not target_id:
@@ -1897,7 +1846,7 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
             await safe_answer_message(
                 message,
                 f"💳 Ок. Сколько ⭐️ начислить пользователю {target_id}? Напишите число. («отмена» для выхода)",
-                reply_markup=admin_menu_kб(),
+                reply_markup=admin_menu_kb(),
             )
             return True
 
@@ -1907,7 +1856,6 @@ async def maybe_handle_admin_dialog(message: types.Message) -> bool:
             await safe_answer_message(message, result, reply_markup=admin_menu_kb())
             return True
 
-    # grant: сумма
     if step == "amount" and mode == "grant":
         try:
             amount = float(text_raw.replace(",", "."))
@@ -2124,7 +2072,8 @@ async def withdraw_confirm_handlers(callback: types.CallbackQuery):
         amount = float(state["pending_amount"])
         to_username = state["pending_username"]
 
-        cursor.execute("SELECT balance FROM users WHERE user_id=?", (user_id,)),
+        # ✅ ИСПРАВЛЕНО: убрана лишняя ]
+        cursor.execute("SELECT balance FROM users WHERE user_id=?", (user_id,))
         r = cursor.fetchone()
         balance = float(r[0]) if r and r[0] is not None else 0.0
         if amount > balance:
@@ -2356,7 +2305,6 @@ async def main_menu_handler(message: types.Message):
     if text in nav_buttons:
         admin_actions.pop(uid, None)
 
-    # Статистика пользователей
     if text == "📈 Статистика пользователей":
         if not await has_admin_access(uid):
             await safe_answer_message(message, "❌ У вас нет доступа.")
@@ -2382,7 +2330,6 @@ async def main_menu_handler(message: types.Message):
         )
         return
 
-    # Изменение награды за реферала
     if text == "⚙️ Изменить награду за реферала":
         if not await has_admin_access(uid):
             await safe_answer_message(message, "❌ У вас нет доступа.")
@@ -2396,7 +2343,6 @@ async def main_menu_handler(message: types.Message):
         )
         return
 
-    # Промокоды в админке
     if text == "🎁 Промокоды":
         if not await has_admin_access(uid):
             await safe_answer_message(message, "❌ У вас нет доступа.")
@@ -2412,7 +2358,6 @@ async def main_menu_handler(message: types.Message):
         )
         return
 
-    # Оценка рисков
     if text == "📊 Оценка рисков":
         if not await has_admin_access(uid):
             await safe_answer_message(message, "❌ У вас нет доступа.")
@@ -2420,12 +2365,11 @@ async def main_menu_handler(message: types.Message):
         admin_actions[uid] = {"mode": "risk", "await": "user"}
         await safe_answer_message(
             message,
-            "🧮 Оценка риска выплат по рефералам.\nПришлите @username или user_id пользователя, для которого нужно оценить риски по его приглашённым.",
+            "🧪 Оценка рисков.\nПришлите @username или user_id пользователя, для которого нужно оценить риски по его приглашённым.",
             reply_markup=admin_menu_kb(),
         )
         return
 
-    # Если сейчас в каком-то админ-диалоге
     if await maybe_handle_admin_dialog(message):
         return
 
@@ -2439,7 +2383,6 @@ async def main_menu_handler(message: types.Message):
         )
         return
 
-    # Админ кнопки
     if text == "📢 Рассылка":
         if not await has_admin_access(user_id):
             await safe_answer_message(message, "❌ У вас нет доступа.")
@@ -2497,7 +2440,6 @@ async def main_menu_handler(message: types.Message):
         )
         return
 
-    # Кнопка в профиле: ввод промокода
     if text == "Вести промокод":
         user_states[user_id] = {"stage": "await_promocode"}
         await safe_answer_message(
@@ -2507,7 +2449,6 @@ async def main_menu_handler(message: types.Message):
         )
         return
 
-    # Обработка состояний вывода / промокода
     state = user_states.get(user_id)
     if state:
         stage = state.get("stage")
@@ -2644,7 +2585,6 @@ async def main_menu_handler(message: types.Message):
             )
             return
 
-    # Обычное меню
     menu_buttons = [
         "Заработать звезды🌟",
         "Профиль 👤",
@@ -2757,7 +2697,6 @@ async def main():
     if not QUIET_LOGGING:
         print("Бот запускается...")
     await dp.start_polling(bot)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
