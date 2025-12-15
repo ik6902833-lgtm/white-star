@@ -1181,57 +1181,80 @@ async def ensure_subscribed(user_id: int, carrier, skip_subgram: bool = False) -
                 cursor.execute("SELECT user_id FROM users WHERE user_id=?", (referrer_id,))
                 ref_exists = cursor.fetchone() is not None
                 if ref_exists:
-                    cursor.execute(
-                        """
-                        UPDATE users
-                        SET balance = balance + ?, total_earned = total_earned + ?, referrals_count = referrals_count + 1
-                        WHERE user_id=?
-                        """,
-                        (REFERRAL_REWARD, REFERRAL_REWARD, referrer_id),
-                    )
-                    cursor.execute(
-                        """
-                        INSERT INTO referral_rewards(referrer_id, referred_id, rewarded, rewarded_at)
-                        VALUES(?,?,1,?)
-                        """,
-                        (referrer_id, user_id, now_str),
-                    )
-                    conn.commit()
+                    # ✅ ДОБАВЛЕНО: если новый аккаунт (молодой ID) — награда не начисляется
+                    if user_id >= YOUNG_ACCOUNT_THRESHOLD:
+                        cursor.execute(
+                            """
+                            INSERT INTO referral_rewards(referrer_id, referred_id, rewarded, rewarded_at)
+                            VALUES(?,?,0,?)
+                            """,
+                            (referrer_id, user_id, now_str),
+                        )
+                        conn.commit()
 
-                    cursor.execute("SELECT referrals_count FROM users WHERE user_id=?", (referrer_id,))
-                    rref = cursor.fetchone()
-                    if rref and rref[0] is not None:
-                        ref_count = rref[0]
-                        if ref_count % REFERRAL_BONUS_EVERY == 0:
-                            cursor.execute(
-                                """
-                                UPDATE users
-                                SET balance = balance + ?, total_earned = total_earned + ?
-                                WHERE user_id=?
-                                """,
-                                (REFERRAL_BONUS_AMOUNT, REFERRAL_BONUS_AMOUNT, referrer_id),
-                            )
-                            conn.commit()
-                            await safe_send_message(
-                                referrer_id,
-                                "🎉 Поздравляем! Вы пригласили "
-                                f"{ref_count} новых пользователей!\n"
-                                f"В качестве бонуса начислено {REFERRAL_BONUS_AMOUNT}.0 ⭐️",
-                            )
+                        await safe_send_message(
+                            referrer_id,
+                            "📲Награда за реферала не начисленя. \n\nПричина : Новый аккаунт",
+                        )
 
-                    await safe_send_message(
-                        referrer_id,
-                        "📲 Новый пользователь "
-                        f"@{username} зарегистрировался по вашей ссылке!\n"
-                        f"- Зачислено {REFERRAL_REWARD}.0 ⭐️",
-                    )
+                        await notify_admin_channel(
+                            "👥 <b>Реф-подтверждение</b>\n"
+                            f"🤝 Пригласил: {ref_disp} (ID: <code>{referrer_id}</code>)\n"
+                            f"👤 Вошёл: {joined_disp} (ID: <code>{user_id}</code>)\n"
+                            f"🕒 {now_str}"
+                        )
+                    else:
+                        cursor.execute(
+                            """
+                            UPDATE users
+                            SET balance = balance + ?, total_earned = total_earned + ?, referrals_count = referrals_count + 1
+                            WHERE user_id=?
+                            """,
+                            (REFERRAL_REWARD, REFERRAL_REWARD, referrer_id),
+                        )
+                        cursor.execute(
+                            """
+                            INSERT INTO referral_rewards(referrer_id, referred_id, rewarded, rewarded_at)
+                            VALUES(?,?,1,?)
+                            """,
+                            (referrer_id, user_id, now_str),
+                        )
+                        conn.commit()
 
-                    await notify_admin_channel(
-                        "👥 <b>Реф-подтверждение</b>\n"
-                        f"🤝 Пригласил: {ref_disp} (ID: <code>{referrer_id}</code>)\n"
-                        f"👤 Вошёл: {joined_disp} (ID: <code>{user_id}</code>)\n"
-                        f"🕒 {now_str}"
-                    )
+                        cursor.execute("SELECT referrals_count FROM users WHERE user_id=?", (referrer_id,))
+                        rref = cursor.fetchone()
+                        if rref and rref[0] is not None:
+                            ref_count = rref[0]
+                            if ref_count % REFERRAL_BONUS_EVERY == 0:
+                                cursor.execute(
+                                    """
+                                    UPDATE users
+                                    SET balance = balance + ?, total_earned = total_earned + ?
+                                    WHERE user_id=?
+                                    """,
+                                    (REFERRAL_BONUS_AMOUNT, REFERRAL_BONUS_AMOUNT, referrer_id),
+                                )
+                                conn.commit()
+                                await safe_send_message(
+                                    referrer_id,
+                                    "🎉 Поздравляем! Вы пригласили "
+                                    f"{ref_count} новых пользователей!\n"
+                                    f"В качестве бонуса начислено {REFERRAL_BONUS_AMOUNT}.0 ⭐️",
+                                )
+
+                        await safe_send_message(
+                            referrer_id,
+                            "📲 Новый пользователь "
+                            f"@{username} зарегистрировался по вашей ссылке!\n"
+                            f"- Зачислено {REFERRAL_REWARD}.0 ⭐️",
+                        )
+
+                        await notify_admin_channel(
+                            "👥 <b>Реф-подтверждение</b>\n"
+                            f"🤝 Пригласил: {ref_disp} (ID: <code>{referrer_id}</code>)\n"
+                            f"👤 Вошёл: {joined_disp} (ID: <code>{user_id}</code>)\n"
+                            f"🕒 {now_str}"
+                        )
                 else:
                     cursor.execute(
                         """
@@ -2794,5 +2817,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
