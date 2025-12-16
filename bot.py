@@ -508,6 +508,67 @@ def set_referral_reward(new_value: int):
     except Exception as e:
         _qwarn(f"[WARN] set_referral_reward failed: {type(e).__name__}")
 
+# ================== ИНФО (СТАТИСТИКА) ==================
+
+BOT_START_DATE_STR = "11.09.2025"
+SIM_WITHDRAW_DEFAULT = 32991
+SIM_WITHDRAW_MIN_ADD = 600
+SIM_WITHDRAW_MAX_ADD = 1900
+SIM_WITHDRAW_TOTAL_KEY = "sim_withdraw_total"
+SIM_WITHDRAW_LAST_DAY_KEY = "sim_withdraw_last_day"
+
+def _config_get(key: str) -> str | None:
+    try:
+        cursor.execute("SELECT value FROM config WHERE key=?", (key,))
+        row = cursor.fetchone()
+        return row[0] if row and row[0] is not None else None
+    except Exception:
+        return None
+
+def _config_set(key: str, value: str):
+    try:
+        cursor.execute(
+            "INSERT OR REPLACE INTO config(key, value) VALUES(?, ?)",
+            (key, value),
+        )
+        conn.commit()
+    except Exception:
+        pass
+
+def get_simulated_withdraw_total() -> int:
+    today = now_kyiv().date()
+
+    total_s = _config_get(SIM_WITHDRAW_TOTAL_KEY)
+    last_day_s = _config_get(SIM_WITHDRAW_LAST_DAY_KEY)
+
+    if total_s is None or last_day_s is None:
+        total = int(SIM_WITHDRAW_DEFAULT)
+        _config_set(SIM_WITHDRAW_TOTAL_KEY, str(total))
+        _config_set(SIM_WITHDRAW_LAST_DAY_KEY, today.isoformat())
+        return total
+
+    try:
+        total = int(float(str(total_s).strip()))
+    except Exception:
+        total = int(SIM_WITHDRAW_DEFAULT)
+
+    try:
+        last_day = datetime.fromisoformat(str(last_day_s).strip()).date()
+    except Exception:
+        last_day = today
+
+    if last_day < today:
+        d = last_day + timedelta(days=1)
+        while d <= today:
+            r = random.Random(f"wsx_withdraw:{d.isoformat()}")
+            inc = r.randint(SIM_WITHDRAW_MIN_ADD, SIM_WITHDRAW_MAX_ADD)
+            total += inc
+            d += timedelta(days=1)
+        _config_set(SIM_WITHDRAW_TOTAL_KEY, str(total))
+        _config_set(SIM_WITHDRAW_LAST_DAY_KEY, today.isoformat())
+
+    return total
+
 # ================== СНГ-ПРОВЕРКА ЧЕРЕЗ САЙТ ==================
 
 CIS_COUNTRY_CODES = {
@@ -2777,9 +2838,17 @@ async def main_menu_handler(message: types.Message):
             )
 
         elif text == "Информация📚":
+            cursor.execute("SELECT COUNT(*) FROM users")
+            total_users_row = cursor.fetchone()
+            total_users = total_users_row[0] if total_users_row and total_users_row[0] is not None else 0
+
+            total_withdrawn = get_simulated_withdraw_total()
+
             info_text = (
                 "<b>Информация о боте:</b>\n\n"
-                "Здесь будет общая статистика / описание, по желанию."
+                f"⭐️Старт бота: {BOT_START_DATE_STR}\n"
+                f"👥Всего пользователей: {total_users}\n"
+                f"📨Всего выведено: {total_withdrawn}⭐️"
             )
             await safe_answer_message(
                 message, info_text, reply_markup=back_keyboard(), parse_mode="HTML"
